@@ -5,13 +5,18 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Copy the official `uv` binaries from Astral's image (pin as desired)
+# (the uv image places the binaries in `/usr/local/bin`)
+COPY --from=ghcr.io/astral-sh/uv:python3.11-trixie-slim /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+
+# Install project dependencies using `uv`
 COPY pyproject.toml /app/
-RUN pip install --no-cache-dir "websockets>=16.0"
+ENV UV_NO_DEV=1
+RUN uv sync
 
 # Copy project files
 COPY . /app
 
 EXPOSE 8765
 
-CMD ["python", "main.py"]
+CMD ["uv", "run", "main.py"]
