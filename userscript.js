@@ -22,6 +22,10 @@
     POLL_MS: 1000,
   };
 
+  // Logging prefix for easy searching in console/UI logs
+  const LOG_SEARCH_PREFIX = "[FAB]"; // searchable short tag
+  const LOG_DISPLAY_TAG = "[FoundryAudioBridge]"; // human-readable tag
+
   let audioCtx = null;
   let ws = null;
   let syncTimer = null;
@@ -30,8 +34,18 @@
   const activeParticipants = new Map();
 
   function log(...args) {
-    console.log("[FoundryAudioBridge]", ...args);
-    appendLog(args.map(String).join(" "));
+    console.log(LOG_DISPLAY_TAG, ...args);
+    appendLog(`${LOG_SEARCH_PREFIX} ${args.map(String).join(" ")}`);
+  }
+
+  function logWarn(...args) {
+    console.warn(LOG_DISPLAY_TAG, ...args);
+    appendLog(`WARN ${LOG_SEARCH_PREFIX} ${args.map(String).join(" ")}`);
+  }
+
+  function logError(...args) {
+    console.error(LOG_DISPLAY_TAG, ...args);
+    appendLog(`ERROR ${LOG_SEARCH_PREFIX} ${args.map(String).join(" ")}`);
   }
 
   function appendLog(msg) {
@@ -144,7 +158,7 @@
         sessionHref: location.href,
       });
       if (ui.autoStart.checked && !bridgeState.running) {
-        startCapture().catch(err => log("start error", err));
+        startCapture().catch(err => logError("start error", err));
       }
     };
 
@@ -156,7 +170,7 @@
     };
 
     ws.onerror = (err) => {
-      log("WS error", err);
+      logError("WS error", err);
     };
 
     ws.onmessage = (event) => {
@@ -167,7 +181,7 @@
   function disconnectWebSocket() {
     clearTimeout(wsReconnectTimer);
     if (ws) {
-      try { ws.close(); } catch {}
+      try { ws.close(); } catch (e) { logWarn("Error closing ws", e); }
       ws = null;
     }
     updateStatus("WS disconnected");
@@ -217,8 +231,8 @@
     const state = activeParticipants.get(participantId);
     if (!state) return;
 
-    try { state.processor.disconnect(); } catch {}
-    try { state.source.disconnect(); } catch {}
+    try { state.processor.disconnect(); } catch (e) { logWarn("Error disconnecting processor", e); }
+    try { state.source.disconnect(); } catch (e) { logWarn("Error disconnecting source", e); }
 
     activeParticipants.delete(participantId);
     renderParticipants();
@@ -513,7 +527,7 @@
     });
 
     panel.querySelector("#fab-connect").onclick = () => connectWebSocket();
-    panel.querySelector("#fab-start").onclick = () => startCapture().catch(err => log("Start failed", err));
+    panel.querySelector("#fab-start").onclick = () => startCapture().catch(err => logError("Start failed", err));
     panel.querySelector("#fab-stop").onclick = () => stopCapture();
   }
 
