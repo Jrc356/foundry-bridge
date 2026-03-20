@@ -10,6 +10,7 @@ from deepgram.core.events import EventType
 from deepgram.listen.v2.types import ListenV2TurnInfo
 from websockets.exceptions import ConnectionClosed
 
+from foundry_bridge.db import init_schema, store_transcript
 from foundry_bridge.subscriber import BaseSubscriber
 
 
@@ -55,12 +56,25 @@ async def speaker_loop(worker: SpeakerWorker) -> None:
             def on_message(message: Any) -> None:
                 if isinstance(message, ListenV2TurnInfo):
                     transcript = getattr(message, "transcript", "") or ""
+                    event = getattr(message, "event", "")
                     if transcript.strip():
                         logging.info(
                             "[%s] event=%s transcript=%s",
                             label,
-                            getattr(message, "event", ""),
+                            event,
                             transcript.strip(),
+                        )
+                    if event == "EndOfTurn" and transcript.strip():
+                        asyncio.get_event_loop().create_task(
+                            store_transcript(
+                                participant_id=worker.participant_id,
+                                character_name=worker.label,
+                                turn_index=int(getattr(message, "turn_index", 0)),
+                                transcript=transcript.strip(),
+                                audio_window_start=float(getattr(message, "audio_window_start", 0.0)),
+                                audio_window_end=float(getattr(message, "audio_window_end", 0.0)),
+                                end_of_turn_confidence=float(getattr(message, "end_of_turn_confidence", 0.0)),
+                            )
                         )
 
             connection.on(EventType.OPEN, on_open)
@@ -175,6 +189,7 @@ class TranscriberSubscriber(BaseSubscriber):
 
 async def _run() -> None:
     logging.info("Starting transcriber subscriber")
+    await init_schema()
     subscriber = TranscriberSubscriber()
     try:
         await subscriber.run()

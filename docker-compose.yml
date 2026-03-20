@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: foundry-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=foundry
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-foundry}
+      - POSTGRES_DB=foundry_bridge
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foundry -d foundry_bridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   bridge:
     build:
       context: .
@@ -17,6 +34,19 @@ services:
       retries: 3
       start_period: 30s
 
+  migrate:
+    build:
+      context: .
+      target: migrate
+    container_name: foundry-migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://foundry:${POSTGRES_PASSWORD:-foundry}@postgres:5432/foundry_bridge
+    command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+
   transcriber:
     build:
       context: .
@@ -26,13 +56,19 @@ services:
     depends_on:
       bridge:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       - PYTHONUNBUFFERED=1
       - BRIDGE_URI=ws://bridge:8765
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - DATABASE_URL=postgresql://foundry:${POSTGRES_PASSWORD:-foundry}@postgres:5432/foundry_bridge
     healthcheck:
       test: ["CMD", "/app/.venv/bin/python", "-m", "foundry_bridge.health_check"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 30s
+
+volumes:
+  postgres_data:
