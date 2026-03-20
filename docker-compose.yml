@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  bridge:
+    build: .
+    container_name: foundry-bridge
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
