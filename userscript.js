@@ -383,9 +383,22 @@
     ui.log = panel.querySelector("#fab-log");
 
     // Make the panel draggable via the header (mouse + touch)
-    // Initialize left so we can reposition from the right CSS value
-    panel.style.left = (window.innerWidth - panel.offsetWidth - 12) + "px";
-    panel.style.right = "auto";
+    // Load saved position if present, otherwise initialize left so we can reposition
+    try {
+      const saved = localStorage.getItem('fab-position');
+      if (saved) {
+        const pos = JSON.parse(saved);
+        if (typeof pos.left === 'number') panel.style.left = pos.left + 'px';
+        if (typeof pos.top === 'number') panel.style.top = pos.top + 'px';
+        panel.style.right = 'auto';
+      } else {
+        panel.style.left = (window.innerWidth - panel.offsetWidth - 12) + "px";
+        panel.style.right = "auto";
+      }
+    } catch (e) {
+      panel.style.left = (window.innerWidth - panel.offsetWidth - 12) + "px";
+      panel.style.right = "auto";
+    }
 
     let dragState = { dragging: false, offsetX: 0, offsetY: 0 };
 
@@ -401,11 +414,20 @@
       panel.style.top = top + 'px';
     }
 
+    function savePosition() {
+      try {
+        const left = parseInt(panel.style.left, 10) || 0;
+        const top = parseInt(panel.style.top, 10) || 0;
+        localStorage.setItem('fab-position', JSON.stringify({ left, top }));
+      } catch (e) {}
+    }
+
     function onMouseUp() {
       dragState.dragging = false;
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       document.body.style.userSelect = '';
+      savePosition();
     }
 
     headerEl.addEventListener('mousedown', (e) => {
@@ -435,7 +457,17 @@
       dragState.dragging = false;
       document.removeEventListener('touchmove', onTouchMove);
       document.removeEventListener('touchend', onTouchEnd);
+      savePosition();
     }
+
+    // Keep panel within viewport on resize and persist
+    window.addEventListener('resize', () => {
+      const left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, parseInt(panel.style.left, 10) || 0));
+      const top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, parseInt(panel.style.top, 10) || 0));
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+      savePosition();
+    });
 
     headerEl.addEventListener('touchstart', (e) => {
       const t = e.touches[0];
