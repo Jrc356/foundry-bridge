@@ -1,3 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/foundry_bridge"]
+
 [project]
 name = "foundry-bridge"
 version = "0.1.0"
@@ -12,3 +19,8 @@ dependencies = [
 transcriber = [
     "deepgram-sdk>=3.0",
 ]
+
+[project.scripts]
+foundry-bridge = "foundry_bridge.server:main"
+foundry-bridge-transcriber = "foundry_bridge.subscribers.transcriber:main"
+foundry-bridge-example = "foundry_bridge.subscribers.example:main"

@@ -9,10 +9,10 @@ sync-transcriber:
 	uv sync --extra transcriber
 
 run:
-	uv run main.py
+	uv run foundry-bridge
 
 run-transcriber:
-	uv run subscriber_transcriber.py
+	uv run foundry-bridge-transcriber
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 
