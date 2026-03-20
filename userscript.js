@@ -378,7 +378,7 @@
       <div id="fab-body">
       <div style="margin-bottom:6px;">
         <label>WS URL</label>
-        <input id="fab-ws" type="text" style="width:100%; box-sizing:border-box;" value="${CONFIG.WS_URL}">
+        <input id="fab-ws" type="text" style="width:100%; box-sizing:border-box; color: #ffffff; background:#222; border:1px solid #444;" value="${CONFIG.WS_URL}">
       </div>
       <div style="display:flex; gap:6px; margin-bottom:6px;">
         <button id="fab-connect">Connect</button>
