@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
+from deepgram.listen.v2.types import ListenV2TurnInfo
 from websockets.exceptions import ConnectionClosed
 
 from foundry_bridge.subscriber import BaseSubscriber
@@ -32,20 +33,6 @@ class SpeakerWorker:
     task: Optional[asyncio.Task[None]] = None
 
 
-def transcript_text_from_message(message: Any) -> str:
-    try:
-        channel = getattr(message, "channel", None)
-        if not channel:
-            return ""
-        alternatives = getattr(channel, "alternatives", None)
-        if not alternatives:
-            return ""
-        first = alternatives[0]
-        return getattr(first, "transcript", "") or ""
-    except Exception:
-        return ""
-
-
 async def speaker_loop(worker: SpeakerWorker) -> None:
     label = worker.label
 
@@ -54,6 +41,7 @@ async def speaker_loop(worker: SpeakerWorker) -> None:
             model="flux-general-en",
             encoding="linear16",
             sample_rate=f"{worker.sample_rate}",
+            eot_timeout_ms="2000",
         ) as connection:
             def on_open(_: Any) -> None:
                 logging.info("[%s] Deepgram connection opened", label)
@@ -65,25 +53,15 @@ async def speaker_loop(worker: SpeakerWorker) -> None:
                 logging.warning("[%s] Deepgram error: %s", label, error)
 
             def on_message(message: Any) -> None:
-                msg_type = getattr(message, "type", "Unknown")
-
-                if msg_type == "Results":
-                    transcript = transcript_text_from_message(message)
-                    is_final = getattr(message, "is_final", False)
-                    speech_final = getattr(message, "speech_final", False)
-
+                if isinstance(message, ListenV2TurnInfo):
+                    transcript = getattr(message, "transcript", "") or ""
                     if transcript.strip():
                         logging.info(
-                            "[%s] final=%s speech_final=%s transcript=%s",
+                            "[%s] event=%s transcript=%s",
                             label,
-                            is_final,
-                            speech_final,
+                            getattr(message, "event", ""),
                             transcript.strip(),
                         )
-                elif msg_type == "SpeechStarted":
-                    logging.info("[%s] speech started", label)
-                elif msg_type == "UtteranceEnd":
-                    logging.info("[%s] utterance end", label)
 
             connection.on(EventType.OPEN, on_open)
             connection.on(EventType.MESSAGE, on_message)
