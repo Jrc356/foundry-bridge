@@ -35,9 +35,11 @@ def make_client_id(ws: ServerConnection) -> str:
 
 async def safe_send_json(ws: ServerConnection, payload: dict) -> bool:
     try:
+        logging.debug("safe_send_json -> %s payload=%s", make_client_id(ws), payload.get("type") if isinstance(payload, dict) else None)
         await ws.send(json.dumps(payload))
         return True
     except Exception:
+        logging.debug("safe_send_json failed -> %s payload=%s", make_client_id(ws), payload.get("type") if isinstance(payload, dict) else None)
         return False
 
 
@@ -48,10 +50,13 @@ async def broadcast_json(payload: dict) -> None:
     dead = []
     message = json.dumps(payload)
 
+    logging.debug("broadcast_json -> %d subscribers type=%s", len(subscriber_clients), payload.get("type") if isinstance(payload, dict) else None)
+
     for ws in subscriber_clients:
         try:
             await ws.send(message)
         except Exception:
+            logging.debug("broadcast_json: send failed to %s", make_client_id(ws))
             dead.append(ws)
 
     for ws in dead:
@@ -66,11 +71,14 @@ async def broadcast_audio(header: dict, payload: bytes) -> None:
     dead = []
     header_msg = json.dumps(header)
 
+    logging.debug("broadcast_audio -> %d subscribers name=%s bytes=%d", len(subscriber_clients), header.get("name"), len(payload))
+
     for ws in subscriber_clients:
         try:
             await ws.send(header_msg)
             await ws.send(payload)
         except Exception:
+            logging.debug("broadcast_audio: send failed to %s", make_client_id(ws))
             dead.append(ws)
 
     for ws in dead:
@@ -99,6 +107,8 @@ async def unregister_connection(ws: ServerConnection) -> None:
 
 async def handle_json_message(state: ConnectionState, data: dict) -> None:
     msg_type = data.get("type")
+
+    logging.debug("handle_json_message <- %s type=%s", state.client_id, msg_type)
 
     if msg_type == "hello":
         role = data.get("role")
@@ -139,6 +149,7 @@ async def handle_json_message(state: ConnectionState, data: dict) -> None:
             state.last_audio_header = data
             return
 
+        logging.debug("ingest_event from %s -> broadcasting", state.client_id)
         await broadcast_json({
             "type": "ingest_event",
             "clientId": state.client_id,
@@ -188,6 +199,7 @@ async def handle_binary_message(state: ConnectionState, payload: bytes) -> None:
         "byteLength": len(payload),
     }
 
+    logging.debug("handle_binary_message <- %s bytes=%d header_name=%s", state.client_id, len(payload), out_header.get("name"))
     await broadcast_audio(out_header, payload)
 
 
@@ -206,9 +218,10 @@ async def handler(ws: ServerConnection) -> None:
                         "message": "invalid JSON",
                     })
                     continue
-
+                logging.debug("received json from %s: type=%s", state.client_id, (json.loads(message).get("type") if isinstance(message, str) else None))
                 await handle_json_message(state, data)
             else:
+                logging.debug("received binary from %s bytes=%d", state.client_id, len(message))
                 await handle_binary_message(state, message)
 
     except Exception as exc:

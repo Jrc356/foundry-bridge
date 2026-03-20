@@ -20,15 +20,23 @@ Foundry VTT (browser)
 - Python ≥ 3.10
 - [`websockets`](https://websockets.readthedocs.io/) ≥ 16.0
 - A userscript manager extension (Tampermonkey, Violentmonkey, etc.)
+- *(Optional, transcriber only)* [`deepgram-sdk`](https://github.com/deepgram/deepgram-python-sdk) ≥ 3.0 — install via the `transcriber` extra (see below)
+- *(Optional)* [Docker](https://docs.docker.com/get-docker/) + [Docker Compose](https://docs.docker.com/compose/)
 
 ## Setup
 
 ### 1. Install Python dependencies
 
 ```bash
+# Bridge only
 uv sync
-# or
-pip install -e .
+
+# Bridge + transcriber subscriber (pulls in deepgram-sdk)
+uv sync --extra transcriber
+
+# Or using the Makefile
+make sync
+make sync-transcriber
 ```
 
 ### 2. Start the bridge
@@ -36,7 +44,7 @@ pip install -e .
 ```bash
 uv run main.py
 # or
-python main.py
+make run
 ```
 
 The server listens on `0.0.0.0:8765` by default.
@@ -50,6 +58,49 @@ Install `userscript.js` via your userscript manager. It matches:
 - `http://localhost:30000/*`
 
 Open Foundry VTT in your browser. A control panel will appear in the top-right corner. Enter the bridge WebSocket URL (default: `ws://127.0.0.1:8765`), then click **Connect** and **Start Capture**.
+
+### 4. Run the transcriber subscriber *(optional)*
+
+Requires a [Deepgram](https://deepgram.com/) API key and the `transcriber` extra installed.
+
+```bash
+DEEPGRAM_API_KEY=your_key_here uv run subscriber_transcriber.py
+# or
+make run-transcriber
+```
+
+## Docker
+
+### Bridge only
+
+```bash
+docker compose up bridge
+# or
+make up-bridge
+```
+
+### Bridge + transcriber
+
+Copy `.env.example` to `.env` (or export `DEEPGRAM_API_KEY`) and then:
+
+```bash
+DEEPGRAM_API_KEY=your_key_here docker compose up
+# or
+make up
+```
+
+### Useful Make targets
+
+| Target | Description |
+|---|---|
+| `make sync` | Install base dependencies |
+| `make sync-transcriber` | Install deps including deepgram-sdk |
+| `make run` | Run the bridge server |
+| `make run-transcriber` | Run the transcriber subscriber |
+| `make build` | Build all Docker images |
+| `make up` | Start all services via Docker Compose |
+| `make up-bridge` | Start bridge service only |
+| `make down` | Stop and remove containers |
 
 ## WebSocket protocol
 

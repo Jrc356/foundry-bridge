@@ -2,10 +2,25 @@ version: '3.8'
 
 services:
   bridge:
-    build: .
+    build:
+      context: .
+      target: bridge
     container_name: foundry-bridge
     ports:
       - "8765:8765"
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
+
+  transcriber:
+    build:
+      context: .
+      target: transcriber
+    container_name: foundry-transcriber
+    restart: unless-stopped
+    depends_on:
+      - bridge
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BRIDGE_URI=ws://bridge:8765
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
