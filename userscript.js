@@ -1,0 +1,410 @@
+// ==UserScript==
+// @name         Foundry LiveKit Audio Bridge
+// @namespace    jon/foundry-livekit-audio
+// @version      0.2.0
+// @description  Capture per-participant LiveKit audio from Foundry and stream PCM16 to an ingestion bridge
+// @match        https://*.forge-vtt.com/*
+// @match        https://*.forge-vtt.net/*
+// @match        http://localhost:30000/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const CONFIG = {
+    WS_URL: "ws://127.0.0.1:8765",
+    SAMPLE_RATE: 48000,
+    BUFFER_SIZE: 4096,
+    UI_Z_INDEX: 999999,
+    AUTO_RECONNECT_MS: 3000,
+    POLL_MS: 1000,
+  };
+
+  let audioCtx = null;
+  let ws = null;
+  let syncTimer = null;
+  let wsReconnectTimer = null;
+
+  const activeParticipants = new Map();
+
+  function log(...args) {
+    console.log("[FoundryAudioBridge]", ...args);
+    appendLog(args.map(String).join(" "));
+  }
+
+  function appendLog(msg) {
+    if (!ui.log) return;
+    const line = document.createElement("div");
+    line.textContent = `${new Date().toLocaleTimeString()} ${msg}`;
+    ui.log.prepend(line);
+    while (ui.log.childNodes.length > 50) {
+      ui.log.removeChild(ui.log.lastChild);
+    }
+  }
+
+  function getLiveKitClient() {
+    try {
+      return window.game?.webrtc?.client?._liveKitClient ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function getParticipantsMap() {
+    const lk = getLiveKitClient();
+    return lk?.liveKitParticipants ?? null;
+  }
+
+  function getParticipantName(participant) {
+    return participant?.name || participant?.identity || participant?.sid || "unknown";
+  }
+
+  function getParticipantAudioPublications(participant) {
+    if (!participant?.audioTracks?.values) return [];
+    return [...participant.audioTracks.values()];
+  }
+
+  function getMediaStreamTrackFromPublication(pub) {
+    const mst =
+      pub?.track?.mediaStreamTrack ??
+      pub?.track?._mediaStreamTrack ??
+      pub?.mediaStreamTrack ??
+      null;
+
+    if (!mst) return null;
+    if (mst.kind !== "audio") return null;
+    if (mst.readyState !== "live") return null;
+    return mst;
+  }
+
+  function float32ToPCM16(float32Array) {
+    const out = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32Array[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  }
+
+  function sendJson(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
+
+  function sendBinary(buffer) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(buffer);
+    }
+  }
+
+  function sendAudioFrame(participantId, name, pcm16) {
+    sendJson({
+      type: "audio",
+      participantId,
+      name,
+      sampleRate: audioCtx.sampleRate,
+      channels: 1,
+      samples: pcm16.length,
+      ts: Date.now(),
+    });
+    sendBinary(pcm16.buffer);
+  }
+
+  async function ensureAudioContext() {
+    if (!audioCtx) {
+      audioCtx = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
+    }
+    if (audioCtx.state !== "running") {
+      await audioCtx.resume();
+    }
+    return audioCtx;
+  }
+
+  function connectWebSocket() {
+    clearTimeout(wsReconnectTimer);
+
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    updateStatus("Connecting WS...");
+    ws = new WebSocket(ui.wsUrl.value.trim());
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      updateStatus("WS connected");
+      sendJson({
+        type: "hello",
+        role: "ingest",
+        source: "foundry-livekit-userscript",
+        userAgent: navigator.userAgent,
+        sessionHref: location.href,
+      });
+      if (ui.autoStart.checked && !bridgeState.running) {
+        startCapture().catch(err => log("start error", err));
+      }
+    };
+
+    ws.onclose = () => {
+      updateStatus("WS disconnected");
+      if (bridgeState.wantRunning) {
+        wsReconnectTimer = setTimeout(connectWebSocket, CONFIG.AUTO_RECONNECT_MS);
+      }
+    };
+
+    ws.onerror = (err) => {
+      log("WS error", err);
+    };
+
+    ws.onmessage = (event) => {
+      log("Server:", typeof event.data === "string" ? event.data : "[binary]");
+    };
+  }
+
+  function disconnectWebSocket() {
+    clearTimeout(wsReconnectTimer);
+    if (ws) {
+      try { ws.close(); } catch {}
+      ws = null;
+    }
+    updateStatus("WS disconnected");
+  }
+
+  function attachParticipant(participantId, participant) {
+    if (activeParticipants.has(participantId)) return;
+
+    const name = getParticipantName(participant);
+    const pubs = getParticipantAudioPublications(participant);
+    if (!pubs.length) return;
+
+    const mst = pubs.map(getMediaStreamTrackFromPublication).find(Boolean);
+    if (!mst) return;
+
+    const stream = new MediaStream([mst]);
+    const source = audioCtx.createMediaStreamSource(stream);
+    const processor = audioCtx.createScriptProcessor(CONFIG.BUFFER_SIZE, 1, 1);
+
+    processor.onaudioprocess = (event) => {
+      if (!bridgeState.running) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const input = event.inputBuffer.getChannelData(0);
+      const pcm16 = float32ToPCM16(input);
+      sendAudioFrame(participantId, name, pcm16);
+    };
+
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    activeParticipants.set(participantId, {
+      participantId,
+      name,
+      mst,
+      stream,
+      source,
+      processor,
+    });
+
+    renderParticipants();
+    sendJson({ type: "participant_attached", participantId, name, ts: Date.now() });
+    log(`Attached ${name} (${participantId})`);
+  }
+
+  function detachParticipant(participantId) {
+    const state = activeParticipants.get(participantId);
+    if (!state) return;
+
+    try { state.processor.disconnect(); } catch {}
+    try { state.source.disconnect(); } catch {}
+
+    activeParticipants.delete(participantId);
+    renderParticipants();
+    sendJson({
+      type: "participant_detached",
+      participantId,
+      name: state.name,
+      ts: Date.now(),
+    });
+    log(`Detached ${state.name} (${participantId})`);
+  }
+
+  function syncParticipants() {
+    const map = getParticipantsMap();
+    if (!map) {
+      renderParticipants();
+      return;
+    }
+
+    const currentIds = new Set();
+
+    for (const [participantId, participant] of map.entries()) {
+      currentIds.add(participantId);
+      attachParticipant(participantId, participant);
+    }
+
+    for (const participantId of [...activeParticipants.keys()]) {
+      if (!currentIds.has(participantId)) {
+        detachParticipant(participantId);
+      }
+    }
+
+    renderParticipants();
+  }
+
+  const bridgeState = {
+    running: false,
+    wantRunning: false,
+  };
+
+  async function startCapture() {
+    bridgeState.wantRunning = true;
+
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      connectWebSocket();
+      return;
+    }
+
+    await ensureAudioContext();
+
+    if (bridgeState.running) return;
+
+    bridgeState.running = true;
+    updateStatus("Capturing");
+
+    clearInterval(syncTimer);
+    syncTimer = setInterval(syncParticipants, CONFIG.POLL_MS);
+    syncParticipants();
+
+    sendJson({
+      type: "capture_started",
+      ts: Date.now(),
+      sampleRate: audioCtx.sampleRate,
+      bufferSize: CONFIG.BUFFER_SIZE,
+    });
+
+    log("Capture started");
+  }
+
+  function stopCapture() {
+    bridgeState.wantRunning = false;
+    bridgeState.running = false;
+
+    clearInterval(syncTimer);
+    syncTimer = null;
+
+    for (const participantId of [...activeParticipants.keys()]) {
+      detachParticipant(participantId);
+    }
+
+    sendJson({ type: "capture_stopped", ts: Date.now() });
+    updateStatus("Stopped");
+    log("Capture stopped");
+  }
+
+  function renderParticipants() {
+    if (!ui.participants) return;
+
+    ui.participants.innerHTML = "";
+    const map = getParticipantsMap();
+
+    if (!map || map.size === 0) {
+      const empty = document.createElement("div");
+      empty.textContent = "No LiveKit participants";
+      ui.participants.appendChild(empty);
+      return;
+    }
+
+    for (const [participantId, participant] of map.entries()) {
+      const row = document.createElement("div");
+      row.style.marginBottom = "4px";
+
+      const pubs = getParticipantAudioPublications(participant);
+      const attached = activeParticipants.has(participantId);
+      const name = getParticipantName(participant);
+      const speaking = !!participant?.isSpeaking;
+      const audioLevel = participant?.audioLevel ?? 0;
+
+      row.textContent =
+        `${name} | pubs=${pubs.length} | attached=${attached} | speaking=${speaking} | level=${audioLevel}`;
+      ui.participants.appendChild(row);
+    }
+  }
+
+  function updateStatus(text) {
+    if (ui.status) ui.status.textContent = text;
+  }
+
+  const ui = {};
+
+  function buildUI() {
+    const panel = document.createElement("div");
+    panel.style.position = "fixed";
+    panel.style.top = "12px";
+    panel.style.right = "12px";
+    panel.style.width = "360px";
+    panel.style.background = "rgba(20,20,20,0.95)";
+    panel.style.color = "#fff";
+    panel.style.padding = "10px";
+    panel.style.border = "1px solid #555";
+    panel.style.borderRadius = "8px";
+    panel.style.zIndex = String(CONFIG.UI_Z_INDEX);
+    panel.style.font = "12px sans-serif";
+    panel.style.boxShadow = "0 4px 12px rgba(0,0,0,0.35)";
+
+    panel.innerHTML = `
+      <div style="font-weight:bold; margin-bottom:8px;">Foundry LiveKit Audio Bridge</div>
+      <div style="margin-bottom:6px;">
+        <label>WS URL</label>
+        <input id="fab-ws" type="text" style="width:100%; box-sizing:border-box;" value="${CONFIG.WS_URL}">
+      </div>
+      <div style="display:flex; gap:6px; margin-bottom:6px;">
+        <button id="fab-connect">Connect</button>
+        <button id="fab-start">Start</button>
+        <button id="fab-stop">Stop</button>
+      </div>
+      <div style="margin-bottom:6px;">
+        <label><input id="fab-auto" type="checkbox" checked> Auto-start when WS connects</label>
+      </div>
+      <div style="margin-bottom:6px;">Status: <span id="fab-status">Idle</span></div>
+      <div style="margin-bottom:6px; max-height:120px; overflow:auto; border:1px solid #444; padding:6px;" id="fab-participants"></div>
+      <div style="max-height:140px; overflow:auto; border:1px solid #444; padding:6px;" id="fab-log"></div>
+    `;
+
+    document.body.appendChild(panel);
+
+    ui.panel = panel;
+    ui.wsUrl = panel.querySelector("#fab-ws");
+    ui.autoStart = panel.querySelector("#fab-auto");
+    ui.status = panel.querySelector("#fab-status");
+    ui.participants = panel.querySelector("#fab-participants");
+    ui.log = panel.querySelector("#fab-log");
+
+    panel.querySelector("#fab-connect").onclick = () => connectWebSocket();
+    panel.querySelector("#fab-start").onclick = () => startCapture().catch(err => log("Start failed", err));
+    panel.querySelector("#fab-stop").onclick = () => stopCapture();
+  }
+
+  function waitForFoundry() {
+    const timer = setInterval(() => {
+      if (document.body && window.game?.webrtc?.client) {
+        clearInterval(timer);
+        buildUI();
+        renderParticipants();
+        log("UI ready");
+      }
+    }, 500);
+  }
+
+  waitForFoundry();
+
+  window.__foundryAudioBridge = {
+    startCapture,
+    stopCapture,
+    connectWebSocket,
+    disconnectWebSocket,
+    syncParticipants,
+  };
+})();
