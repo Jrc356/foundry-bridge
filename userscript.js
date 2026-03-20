@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Foundry LiveKit Audio Bridge
 // @namespace    jon/foundry-livekit-audio
-// @version      0.2.0
+// @version      0.3.0
 // @description  Capture per-participant LiveKit audio from Foundry and stream PCM16 to an ingestion bridge
 // @match        https://*.forge-vtt.com/*
 // @match        https://*.forge-vtt.net/*
@@ -22,9 +22,8 @@
     POLL_MS: 1000,
   };
 
-  // Logging prefix for easy searching in console/UI logs
-  const LOG_SEARCH_PREFIX = "[FAB]"; // searchable short tag
-  const LOG_DISPLAY_TAG = "[FoundryAudioBridge]"; // human-readable tag
+  const LOG_SEARCH_PREFIX = "[FAB]";
+  const LOG_DISPLAY_TAG = "[FoundryAudioBridge]";
 
   let audioCtx = null;
   let ws = null;
@@ -71,8 +70,40 @@
     return lk?.liveKitParticipants ?? null;
   }
 
-  function getParticipantName(participant) {
-    return participant?.name || participant?.identity || participant?.sid || "unknown";
+  function getFoundryUser(participantId) {
+    try {
+      return window.game?.users?.get?.(participantId) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function getParticipantMetadata(participantId, participant) {
+    const user = getFoundryUser(participantId);
+
+    const userName =
+      user?.name ||
+      participant?.name ||
+      participant?.identity ||
+      participant?.sid ||
+      "unknown";
+
+    const characterName =
+      user?.character?.name ||
+      null;
+
+    const label = characterName || userName;
+
+    return {
+      participantId,
+      userId: user?.id || participantId,
+      userName,
+      characterName,
+      label,
+      liveKitName: participant?.name || null,
+      liveKitIdentity: participant?.identity || null,
+      liveKitSid: participant?.sid || null,
+    };
   }
 
   function getParticipantAudioPublications(participant) {
@@ -114,11 +145,18 @@
     }
   }
 
-  function sendAudioFrame(participantId, name, pcm16) {
+  function sendAudioFrame(meta, pcm16) {
     sendJson({
       type: "audio",
-      participantId,
-      name,
+      participantId: meta.participantId,
+      userId: meta.userId,
+      name: meta.label,
+      label: meta.label,
+      userName: meta.userName,
+      characterName: meta.characterName,
+      liveKitName: meta.liveKitName,
+      liveKitIdentity: meta.liveKitIdentity,
+      liveKitSid: meta.liveKitSid,
       sampleRate: audioCtx.sampleRate,
       channels: 1,
       samples: pcm16.length,
@@ -190,7 +228,7 @@
   function attachParticipant(participantId, participant) {
     if (activeParticipants.has(participantId)) return;
 
-    const name = getParticipantName(participant);
+    const meta = getParticipantMetadata(participantId, participant);
     const pubs = getParticipantAudioPublications(participant);
     if (!pubs.length) return;
 
@@ -207,7 +245,7 @@
 
       const input = event.inputBuffer.getChannelData(0);
       const pcm16 = float32ToPCM16(input);
-      sendAudioFrame(participantId, name, pcm16);
+      sendAudioFrame(meta, pcm16);
     };
 
     source.connect(processor);
@@ -215,7 +253,7 @@
 
     activeParticipants.set(participantId, {
       participantId,
-      name,
+      meta,
       mst,
       stream,
       source,
@@ -223,8 +261,20 @@
     });
 
     renderParticipants();
-    sendJson({ type: "participant_attached", participantId, name, ts: Date.now() });
-    log(`Attached ${name} (${participantId})`);
+    sendJson({
+      type: "participant_attached",
+      participantId,
+      userId: meta.userId,
+      name: meta.label,
+      label: meta.label,
+      userName: meta.userName,
+      characterName: meta.characterName,
+      liveKitName: meta.liveKitName,
+      liveKitIdentity: meta.liveKitIdentity,
+      liveKitSid: meta.liveKitSid,
+      ts: Date.now(),
+    });
+    log(`Attached ${meta.label} (${participantId})`);
   }
 
   function detachParticipant(participantId) {
@@ -239,10 +289,17 @@
     sendJson({
       type: "participant_detached",
       participantId,
-      name: state.name,
+      userId: state.meta.userId,
+      name: state.meta.label,
+      label: state.meta.label,
+      userName: state.meta.userName,
+      characterName: state.meta.characterName,
+      liveKitName: state.meta.liveKitName,
+      liveKitIdentity: state.meta.liveKitIdentity,
+      liveKitSid: state.meta.liveKitSid,
       ts: Date.now(),
     });
-    log(`Detached ${state.name} (${participantId})`);
+    log(`Detached ${state.meta.label} (${participantId})`);
   }
 
   function syncParticipants() {
@@ -337,12 +394,16 @@
 
       const pubs = getParticipantAudioPublications(participant);
       const attached = activeParticipants.has(participantId);
-      const name = getParticipantName(participant);
+      const meta = getParticipantMetadata(participantId, participant);
       const speaking = !!participant?.isSpeaking;
       const audioLevel = participant?.audioLevel ?? 0;
 
+      const secondary = meta.characterName
+        ? `${meta.characterName} (${meta.userName})`
+        : meta.userName;
+
       row.textContent =
-        `${name} | pubs=${pubs.length} | attached=${attached} | speaking=${speaking} | level=${audioLevel}`;
+        `${secondary} | pubs=${pubs.length} | attached=${attached} | speaking=${speaking} | level=${audioLevel}`;
       ui.participants.appendChild(row);
     }
   }
@@ -403,41 +464,39 @@
     ui.participants = panel.querySelector("#fab-participants");
     ui.log = panel.querySelector("#fab-log");
 
-    ui.body = panel.querySelector('#fab-body');
-    ui.toggleBtn = panel.querySelector('#fab-toggle');
+    ui.body = panel.querySelector("#fab-body");
+    ui.toggleBtn = panel.querySelector("#fab-toggle");
 
     function setCollapsed(collapsed) {
       if (collapsed) {
-        ui.body.style.display = 'none';
-        ui.toggleBtn.textContent = '▸';
+        ui.body.style.display = "none";
+        ui.toggleBtn.textContent = "▸";
       } else {
-        ui.body.style.display = '';
-        ui.toggleBtn.textContent = '▾';
+        ui.body.style.display = "";
+        ui.toggleBtn.textContent = "▾";
       }
-      try { localStorage.setItem('fab-collapsed', JSON.stringify(!!collapsed)); } catch (e) {}
+      try { localStorage.setItem("fab-collapsed", JSON.stringify(!!collapsed)); } catch (e) {}
     }
 
     try {
-      const raw = localStorage.getItem('fab-collapsed');
+      const raw = localStorage.getItem("fab-collapsed");
       const collapsed = raw ? JSON.parse(raw) : false;
       setCollapsed(collapsed);
     } catch (e) { setCollapsed(false); }
 
-    ui.toggleBtn.addEventListener('click', (e) => {
+    ui.toggleBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const newVal = ui.body.style.display !== 'none';
+      const newVal = ui.body.style.display !== "none";
       setCollapsed(newVal);
     });
 
-    // Make the panel draggable via the header (mouse + touch)
-    // Load saved position if present, otherwise initialize left so we can reposition
     try {
-      const saved = localStorage.getItem('fab-position');
+      const saved = localStorage.getItem("fab-position");
       if (saved) {
         const pos = JSON.parse(saved);
-        if (typeof pos.left === 'number') panel.style.left = pos.left + 'px';
-        if (typeof pos.top === 'number') panel.style.top = pos.top + 'px';
-        panel.style.right = 'auto';
+        if (typeof pos.left === "number") panel.style.left = pos.left + "px";
+        if (typeof pos.top === "number") panel.style.top = pos.top + "px";
+        panel.style.right = "auto";
       } else {
         panel.style.left = (window.innerWidth - panel.offsetWidth - 12) + "px";
         panel.style.right = "auto";
@@ -449,7 +508,7 @@
 
     let dragState = { dragging: false, offsetX: 0, offsetY: 0 };
 
-    const headerEl = panel.querySelector('#fab-header');
+    const headerEl = panel.querySelector("#fab-header");
 
     function onMouseMove(e) {
       if (!dragState.dragging) return;
@@ -457,38 +516,37 @@
       let top = e.clientY - dragState.offsetY;
       left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, left));
       top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, top));
-      panel.style.left = left + 'px';
-      panel.style.top = top + 'px';
+      panel.style.left = left + "px";
+      panel.style.top = top + "px";
     }
 
     function savePosition() {
       try {
         const left = parseInt(panel.style.left, 10) || 0;
         const top = parseInt(panel.style.top, 10) || 0;
-        localStorage.setItem('fab-position', JSON.stringify({ left, top }));
+        localStorage.setItem("fab-position", JSON.stringify({ left, top }));
       } catch (e) {}
     }
 
     function onMouseUp() {
       dragState.dragging = false;
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.userSelect = '';
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.userSelect = "";
       savePosition();
     }
 
-    headerEl.addEventListener('mousedown', (e) => {
+    headerEl.addEventListener("mousedown", (e) => {
       e.preventDefault();
       dragState.dragging = true;
       const rect = panel.getBoundingClientRect();
       dragState.offsetX = e.clientX - rect.left;
       dragState.offsetY = e.clientY - rect.top;
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
-      document.body.style.userSelect = 'none';
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      document.body.style.userSelect = "none";
     });
 
-    // Touch support
     function onTouchMove(e) {
       if (!dragState.dragging) return;
       const t = e.touches[0];
@@ -496,34 +554,33 @@
       let top = t.clientY - dragState.offsetY;
       left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, left));
       top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, top));
-      panel.style.left = left + 'px';
-      panel.style.top = top + 'px';
+      panel.style.left = left + "px";
+      panel.style.top = top + "px";
     }
 
     function onTouchEnd() {
       dragState.dragging = false;
-      document.removeEventListener('touchmove', onTouchMove);
-      document.removeEventListener('touchend', onTouchEnd);
+      document.removeEventListener("touchmove", onTouchMove);
+      document.removeEventListener("touchend", onTouchEnd);
       savePosition();
     }
 
-    // Keep panel within viewport on resize and persist
-    window.addEventListener('resize', () => {
+    window.addEventListener("resize", () => {
       const left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, parseInt(panel.style.left, 10) || 0));
       const top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, parseInt(panel.style.top, 10) || 0));
-      panel.style.left = left + 'px';
-      panel.style.top = top + 'px';
+      panel.style.left = left + "px";
+      panel.style.top = top + "px";
       savePosition();
     });
 
-    headerEl.addEventListener('touchstart', (e) => {
+    headerEl.addEventListener("touchstart", (e) => {
       const t = e.touches[0];
       dragState.dragging = true;
       const rect = panel.getBoundingClientRect();
       dragState.offsetX = t.clientX - rect.left;
       dragState.offsetY = t.clientY - rect.top;
-      document.addEventListener('touchmove', onTouchMove, { passive: false });
-      document.addEventListener('touchend', onTouchEnd);
+      document.addEventListener("touchmove", onTouchMove, { passive: false });
+      document.addEventListener("touchend", onTouchEnd);
     });
 
     panel.querySelector("#fab-connect").onclick = () => connectWebSocket();
