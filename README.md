@@ -1,8 +1,6 @@
 # foundry-bridge
 
-A WebSocket bridge that captures per-participant audio from [Foundry VTT](https://foundryvtt.com/)'s LiveKit voice chat and streams it to any number of subscribers (e.g. for transcription, recording, or processing).
-
-## How it works
+A WebSocket bridge that captures per-participant audio from [Foundry VTT](https://foundryvtt.com/)'s LiveKit voice chat and streams it to any number of subscriber clients — for transcription, recording, or any custom audio processing pipeline.
 
 ```
 Foundry VTT (browser)
@@ -10,191 +8,25 @@ Foundry VTT (browser)
          (ingest)                                                            (e.g. transcribers)
 ```
 
-1. **`userscript.js`** runs inside the Foundry VTT tab via a userscript manager (Tampermonkey / Violentmonkey). It taps into the LiveKit client, captures each participant's audio track, converts it to raw PCM16, and forwards it over WebSocket to the bridge.
-2. **`foundry_bridge.server`** is the bridge server. It accepts two kinds of WebSocket connections:
-   - **ingest** – the userscript; sends audio frames and lifecycle events.
-   - **subscriber** – downstream consumers; receive every audio frame and event broadcast from all ingest clients.
+## Documentation
 
-## Requirements
-
-- Python ≥ 3.10
-- [`websockets`](https://websockets.readthedocs.io/) ≥ 16.0
-- A userscript manager extension (Tampermonkey, Violentmonkey, etc.)
-- *(Optional, transcriber only)* [`deepgram-sdk`](https://github.com/deepgram/deepgram-python-sdk) ≥ 3.0 — install via the `transcriber` extra (see below)
-- *(Optional)* [Docker](https://docs.docker.com/get-docker/) + [Docker Compose](https://docs.docker.com/compose/)
-
-## Setup
-
-### 1. Install Python dependencies
-
-```bash
-# Bridge only
-uv sync
-
-# Bridge + transcriber subscriber (pulls in deepgram-sdk)
-uv sync --extra transcriber
-
-# Or using the Makefile
-make sync
-make sync-transcriber
-```
-
-### 2. Start the bridge
-
-```bash
-uv run foundry-bridge
-# or
-make run
-```
-
-The server listens on `0.0.0.0:8765` by default.
-
-### 3. Install the userscript
-
-Install `userscript.js` via your userscript manager. It matches:
-
-- `https://*.forge-vtt.com/*`
-- `https://*.forge-vtt.net/*`
-- `http://localhost:30000/*`
-
-Open Foundry VTT in your browser. A control panel will appear in the top-right corner. Enter the bridge WebSocket URL (default: `ws://127.0.0.1:8765`), then click **Connect** and **Start Capture**.
-
-### 4. Run the transcriber subscriber *(optional)*
-
-Requires a [Deepgram](https://deepgram.com/) API key and the `transcriber` extra installed.
-
-```bash
-DEEPGRAM_API_KEY=your_key_here uv run foundry-bridge-transcriber
-# or
-make run-transcriber
-```
-
-## Docker
-
-### Bridge only
-
-```bash
-docker compose up bridge
-# or
-make up-bridge
-```
-
-### Bridge + transcriber
-
-Copy `.env.example` to `.env` (or export `DEEPGRAM_API_KEY`) and then:
-
-```bash
-DEEPGRAM_API_KEY=your_key_here docker compose up
-# or
-make up
-```
-
-### Useful Make targets
-
-| Target | Description |
+| | |
 |---|---|
-| `make sync` | Install base dependencies |
-| `make sync-transcriber` | Install deps including deepgram-sdk |
-| `make run` | Run the bridge server |
-| `make run-transcriber` | Run the transcriber subscriber |
-| `make build` | Build all Docker images |
-| `make up` | Start all services via Docker Compose |
-| `make up-bridge` | Start bridge service only |
-| `make down` | Stop and remove containers |
+| **[Tutorial: Build your first foundry-bridge setup](docs/tutorials/getting-started.md)** | New here? A hands-on walkthrough from install to working audio capture. |
+| **[How-to guides](docs/how-to/)** | Task-oriented guides for operators and subscriber developers. |
+| **[Reference](docs/reference/)** | Complete specs for the WebSocket protocol, API, configuration, and database schema. |
+| **[Explanation: Architecture](docs/explanation/architecture.md)** | Design decisions and architectural concepts behind foundry-bridge. |
 
-## Project structure
+### How-to guides
 
-```
-src/foundry_bridge/
-    server.py              # WebSocket bridge server
-    subscriber.py          # BaseSubscriber abstract class
-    subscribers/
-        example.py         # Minimal debug consumer (prints audio metadata)
-        transcriber.py     # Deepgram speech-to-text consumer
-userscript.js              # Browser-side audio capture
-```
+- [How to install the userscript](docs/how-to/install-the-userscript.md) — Set up audio capture in your Foundry VTT browser tab
+- [How to deploy with Docker Compose](docs/how-to/deploy-with-docker.md) — Run the full stack in containers
+- [How to set up live transcription with Deepgram](docs/how-to/set-up-transcription.md) — Connect speech-to-text and persist transcripts to PostgreSQL
+- [How to write a custom subscriber](docs/how-to/write-a-custom-subscriber.md) — Build your own audio consumer
 
-To write your own subscriber, subclass `BaseSubscriber` and implement `on_audio_frame`:
+### Reference
 
-```python
-from foundry_bridge.subscriber import BaseSubscriber
-
-class MySubscriber(BaseSubscriber):
-    def __init__(self):
-        super().__init__(uri="ws://127.0.0.1:8765", name="my-subscriber")
-
-    async def on_audio_frame(self, header: dict, data: bytes) -> None:
-        ...  # do something with the PCM16-LE audio
-
-    async def on_event(self, event: dict) -> None:
-        ...  # optional: handle lifecycle events
-```
-
-## WebSocket protocol
-
-All JSON messages have a `type` field.
-
-### Handshake (both roles)
-
-Send a `hello` message after connecting:
-
-```json
-{ "type": "hello", "role": "ingest" }
-{ "type": "hello", "role": "subscriber" }
-```
-
-The server replies with:
-
-```json
-{ "type": "hello_ack", "role": "...", "clientId": "..." }
-```
-
-### Audio frames (ingest → server → subscribers)
-
-Ingest clients send a JSON header followed immediately by a binary WebSocket frame containing the raw PCM16-LE samples:
-
-```json
-{
-  "type": "audio",
-  "participantId": "...",
-  "name": "Alice",
-  "sampleRate": 48000,
-  "channels": 1,
-  "samples": 4096,
-  "ts": 1700000000000
-}
-```
-
-Subscribers receive **two consecutive WebSocket messages** per audio chunk:
-
-1. A JSON header:
-
-```json
-{
-  "type": "audio_frame_header",
-  "clientId": "...",
-  "participantId": "...",
-  "name": "Alice",
-  "sampleRate": 48000,
-  "channels": 1,
-  "samples": 4096,
-  "ts": 1700000000000,
-  "encoding": "pcm_s16le",
-  "byteLength": 8192
-}
-```
-
-2. A raw binary WebSocket frame containing the PCM16-LE audio data (`byteLength` bytes).
-
-See `src/foundry_bridge/subscribers/example.py` for a minimal reference consumer, or subclass `foundry_bridge.subscriber.BaseSubscriber` to build your own.
-
-### Lifecycle events
-
-| `type`                    | Direction              | Description                        |
-|---------------------------|------------------------|------------------------------------|
-| `bridge_connection_opened`| server → subscribers   | An ingest or subscriber connected  |
-| `bridge_connection_closed`| server → subscribers   | A client disconnected              |
-| `participant_attached`    | ingest → subscribers   | Audio capture started for a participant |
-| `participant_detached`    | ingest → subscribers   | Audio capture stopped for a participant |
-| `capture_started`         | ingest → subscribers   | Capture session started            |
-| `capture_stopped`         | ingest → subscribers   | Capture session stopped            |
+- [WebSocket protocol](docs/reference/websocket-protocol.md) — Handshake, audio frames, lifecycle events
+- [BaseSubscriber API](docs/reference/base-subscriber-api.md) — Abstract class, methods, and type signatures
+- [Configuration](docs/reference/configuration.md) — Environment variables, CLI entry points, Makefile targets, ports
+- [Database schema](docs/reference/database-schema.md) — The `transcripts` table
