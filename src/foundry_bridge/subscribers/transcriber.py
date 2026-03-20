@@ -126,6 +126,13 @@ class TranscriberSubscriber(BaseSubscriber):
         sample_rate = int(header.get("sampleRate", 48000))
         channels = int(header.get("channels", 1))
 
+        logging.debug(
+            "Audio frame for %s: sampleRate=%d, channels=%d, bytes=%d",
+            label,
+            sample_rate,
+            channels,
+            len(data),
+        )
         worker = await self._ensure_speaker_worker(
             participant_id=participant_id,
             label=str(label),
@@ -136,12 +143,14 @@ class TranscriberSubscriber(BaseSubscriber):
 
     async def on_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        logging.debug("Received event type: %s", event_type)
 
         if event_type == "ingest_event":
             inner = event.get("event", {})
             if inner.get("type") == "participant_detached":
                 participant_id = inner.get("participantId")
                 if participant_id:
+                    logging.info("Participant detached: %s", participant_id)
                     await self._close_speaker_worker(participant_id)
 
     async def _ensure_speaker_worker(
@@ -187,13 +196,18 @@ class TranscriberSubscriber(BaseSubscriber):
 
 
 async def _run() -> None:
+    logging.info("Starting transcriber subscriber")
     subscriber = TranscriberSubscriber()
     try:
         await subscriber.run()
     except ConnectionClosed:
         logging.info("Bridge connection closed")
+    except Exception as exc:
+        logging.exception("Transcriber subscriber failed: %s", exc)
     finally:
+        logging.info("Shutting down speaker workers")
         await subscriber._shutdown_all_workers()
+        logging.info("Transcriber subscriber stopped")
 
 
 def main() -> None:

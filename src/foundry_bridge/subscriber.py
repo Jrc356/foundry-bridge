@@ -19,12 +19,15 @@ class BaseSubscriber(ABC):
 
     async def run(self) -> None:
         """Connect to the bridge and dispatch messages until the connection closes."""
+        logging.info("[%s] Connecting to bridge at %s", self.name, self.uri)
         async with connect(self.uri, max_size=None) as ws:
+            logging.info("[%s] Connected to bridge", self.name)
             await ws.send(json.dumps({
                 "type": "hello",
                 "role": "subscriber",
                 "name": self.name,
             }))
+            logging.debug("[%s] Hello message sent", self.name)
 
             pending_audio_header: Optional[dict[str, Any]] = None
 
@@ -34,7 +37,9 @@ class BaseSubscriber(ABC):
 
                     if event.get("type") == "audio_frame_header":
                         pending_audio_header = event
+                        logging.debug("[%s] Received audio frame header", self.name)
                     else:
+                        logging.debug("[%s] Received event: %s", self.name, event.get("type"))
                         await self.on_event(event)
                 else:
                     if pending_audio_header is None:
@@ -43,6 +48,12 @@ class BaseSubscriber(ABC):
 
                     header = pending_audio_header
                     pending_audio_header = None
+                    logging.debug(
+                        "[%s] Received audio frame from %s (%d bytes)",
+                        self.name,
+                        header.get("participantId"),
+                        len(message),
+                    )
                     await self.on_audio_frame(header, message)
 
     @abstractmethod
