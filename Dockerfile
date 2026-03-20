@@ -12,11 +12,12 @@ COPY --from=ghcr.io/astral-sh/uv:python3.11-trixie-slim /usr/local/bin/uv /usr/l
 # Install project dependencies using `uv`
 COPY pyproject.toml /app/
 ENV UV_NO_DEV=1
-RUN uv sync
+ENV UV_PYTHON_DOWNLOADS=never
+RUN uv sync --python /usr/local/bin/python3.11
 
 # Copy project files
 COPY . /app
 
 EXPOSE 8765
 
-CMD ["uv", "run", "main.py"]
+CMD ["/app/.venv/bin/python", "main.py"]
