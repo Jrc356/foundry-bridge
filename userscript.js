@@ -355,7 +355,13 @@
     panel.style.boxShadow = "0 4px 12px rgba(0,0,0,0.35)";
 
     panel.innerHTML = `
-      <div id="fab-header" style="font-weight:bold; margin-bottom:8px; cursor:move; -webkit-user-select:none; user-select:none;">Foundry LiveKit Audio Bridge</div>
+      <div id="fab-header" style="font-weight:bold; margin-bottom:8px; cursor:move; -webkit-user-select:none; user-select:none;">
+        <span style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span>Foundry LiveKit Audio Bridge</span>
+          <button id="fab-toggle" style="background:transparent; border:1px solid #666; color:#fff; padding:2px 6px; border-radius:4px; cursor:pointer;">▾</button>
+        </span>
+      </div>
+      <div id="fab-body">
       <div style="margin-bottom:6px;">
         <label>WS URL</label>
         <input id="fab-ws" type="text" style="width:100%; box-sizing:border-box;" value="${CONFIG.WS_URL}">
@@ -371,6 +377,7 @@
       <div style="margin-bottom:6px;">Status: <span id="fab-status">Idle</span></div>
       <div style="margin-bottom:6px; max-height:120px; overflow:auto; border:1px solid #444; padding:6px;" id="fab-participants"></div>
       <div style="max-height:140px; overflow:auto; border:1px solid #444; padding:6px;" id="fab-log"></div>
+      </div>
     `;
 
     document.body.appendChild(panel);
@@ -381,6 +388,32 @@
     ui.status = panel.querySelector("#fab-status");
     ui.participants = panel.querySelector("#fab-participants");
     ui.log = panel.querySelector("#fab-log");
+
+    ui.body = panel.querySelector('#fab-body');
+    ui.toggleBtn = panel.querySelector('#fab-toggle');
+
+    function setCollapsed(collapsed) {
+      if (collapsed) {
+        ui.body.style.display = 'none';
+        ui.toggleBtn.textContent = '▸';
+      } else {
+        ui.body.style.display = '';
+        ui.toggleBtn.textContent = '▾';
+      }
+      try { localStorage.setItem('fab-collapsed', JSON.stringify(!!collapsed)); } catch (e) {}
+    }
+
+    try {
+      const raw = localStorage.getItem('fab-collapsed');
+      const collapsed = raw ? JSON.parse(raw) : false;
+      setCollapsed(collapsed);
+    } catch (e) { setCollapsed(false); }
+
+    ui.toggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const newVal = ui.body.style.display !== 'none';
+      setCollapsed(newVal);
+    });
 
     // Make the panel draggable via the header (mouse + touch)
     // Load saved position if present, otherwise initialize left so we can reposition
