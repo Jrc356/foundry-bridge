@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Foundry LiveKit Audio Bridge
 // @namespace    jon/foundry-livekit-audio
-// @version      0.3.0
+// @version      0.4.0
 // @description  Capture per-participant LiveKit audio from Foundry and stream PCM16 to an ingestion bridge
 // @match        https://*.forge-vtt.com/*
 // @match        https://*.forge-vtt.net/*
@@ -165,6 +165,10 @@
     sendBinary(pcm16.buffer);
   }
 
+  function shouldSendAudioFrame(state) {
+    return !!state?.participant?.isSpeaking;
+  }
+
   async function ensureAudioContext() {
     if (!audioCtx) {
       audioCtx = new AudioContext({ sampleRate: CONFIG.SAMPLE_RATE });
@@ -239,26 +243,36 @@
     const source = audioCtx.createMediaStreamSource(stream);
     const processor = audioCtx.createScriptProcessor(CONFIG.BUFFER_SIZE, 1, 1);
 
-    processor.onaudioprocess = (event) => {
-      if (!bridgeState.running) return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const input = event.inputBuffer.getChannelData(0);
-      const pcm16 = float32ToPCM16(input);
-      sendAudioFrame(meta, pcm16);
-    };
-
-    source.connect(processor);
-    processor.connect(audioCtx.destination);
-
-    activeParticipants.set(participantId, {
+    const state = {
       participantId,
+      participant,
       meta,
       mst,
       stream,
       source,
       processor,
-    });
+      sentFrames: 0,
+      skippedFrames: 0,
+    };
+
+    processor.onaudioprocess = (event) => {
+      if (!bridgeState.running) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!shouldSendAudioFrame(state)) {
+        state.skippedFrames++;
+        return;
+      }
+
+      const input = event.inputBuffer.getChannelData(0);
+      const pcm16 = float32ToPCM16(input);
+      sendAudioFrame(state.meta, pcm16);
+      state.sentFrames++;
+    };
+
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    activeParticipants.set(participantId, state);
 
     renderParticipants();
     sendJson({
@@ -313,7 +327,14 @@
 
     for (const [participantId, participant] of map.entries()) {
       currentIds.add(participantId);
-      attachParticipant(participantId, participant);
+
+      const existing = activeParticipants.get(participantId);
+      if (existing) {
+        existing.participant = participant;
+        existing.meta = getParticipantMetadata(participantId, participant);
+      } else {
+        attachParticipant(participantId, participant);
+      }
     }
 
     for (const participantId of [...activeParticipants.keys()]) {
@@ -597,7 +618,7 @@
         log("UI ready");
         try {
           if (ui.autoStart && ui.autoStart.checked) {
-            startCapture().catch(err => logWarn('Auto-start failed', err));
+            startCapture().catch(err => logWarn("Auto-start failed", err));
           }
         } catch (e) {
           logWarn("Auto-start failed", e);
