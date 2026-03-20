@@ -16,6 +16,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 BRIDGE_URI = os.getenv("BRIDGE_URI", "ws://127.0.0.1:8765")
 DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]
+if not DEEPGRAM_API_KEY:
+    raise ValueError("DEEPGRAM_API_KEY environment variable is required")
 
 dg_client = AsyncDeepgramClient(api_key=DEEPGRAM_API_KEY)
 

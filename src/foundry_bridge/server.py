@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 HOST = "0.0.0.0"
 PORT = 8765
+HEALTH_PORT = 8766
 
 
 @dataclass
@@ -217,6 +218,38 @@ async def handler(ws: ServerConnection) -> None:
         await unregister_connection(ws)
 
 
+async def health_check_handler(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """Handle HTTP health check requests."""
+    try:
+        request_line = await reader.readline()
+        request_line = request_line.decode("utf-8").strip()
+
+        if not request_line.startswith("GET /health"):
+            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 13\r\n\r\nNot Found\r\n")
+            await writer.drain()
+            writer.close()
+            return
+
+        response_body = json.dumps({"status": "ok"})
+        response_body_bytes = response_body.encode("utf-8")
+        response = (
+            f"HTTP/1.1 200 OK\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(response_body_bytes)}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode("utf-8")
+        writer.write(response + response_body_bytes)
+        await writer.drain()
+    except Exception as exc:
+        logging.error("health check handler error: %s", exc)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 async def _main() -> None:
     logging.info("starting ingestion bridge on ws://%s:%s", HOST, PORT)
     loop = asyncio.get_running_loop()
@@ -225,12 +258,19 @@ async def _main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set_result, None)
 
+    # Start health check HTTP server
+    health_server = await asyncio.start_server(
+        health_check_handler, HOST, HEALTH_PORT
+    )
+    logging.info("health check server started on http://%s:%s/health", HOST, HEALTH_PORT)
+
     async with serve(handler, HOST, PORT, max_size=None) as server:
         logging.info("server ready")
-        await stop
-        logging.info("shutdown signal received, closing connections...")
-        server.close()
-        await server.wait_closed()
+        async with health_server:
+            await stop
+            logging.info("shutdown signal received, closing connections...")
+            server.close()
+            await server.wait_closed()
 
     logging.info("server stopped")
 
