@@ -595,6 +595,13 @@
         buildUI();
         renderParticipants();
         log("UI ready");
+        try {
+          if (ui.autoStart && ui.autoStart.checked) {
+            startCapture().catch(err => logWarn('Auto-start failed', err));
+          }
+        } catch (e) {
+          logWarn("Auto-start failed", e);
+        }
       }
     }, 500);
   }
