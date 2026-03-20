@@ -355,7 +355,7 @@
     panel.style.boxShadow = "0 4px 12px rgba(0,0,0,0.35)";
 
     panel.innerHTML = `
-      <div style="font-weight:bold; margin-bottom:8px;">Foundry LiveKit Audio Bridge</div>
+      <div id="fab-header" style="font-weight:bold; margin-bottom:8px; cursor:move; -webkit-user-select:none; user-select:none;">Foundry LiveKit Audio Bridge</div>
       <div style="margin-bottom:6px;">
         <label>WS URL</label>
         <input id="fab-ws" type="text" style="width:100%; box-sizing:border-box;" value="${CONFIG.WS_URL}">
@@ -381,6 +381,71 @@
     ui.status = panel.querySelector("#fab-status");
     ui.participants = panel.querySelector("#fab-participants");
     ui.log = panel.querySelector("#fab-log");
+
+    // Make the panel draggable via the header (mouse + touch)
+    // Initialize left so we can reposition from the right CSS value
+    panel.style.left = (window.innerWidth - panel.offsetWidth - 12) + "px";
+    panel.style.right = "auto";
+
+    let dragState = { dragging: false, offsetX: 0, offsetY: 0 };
+
+    const headerEl = panel.querySelector('#fab-header');
+
+    function onMouseMove(e) {
+      if (!dragState.dragging) return;
+      let left = e.clientX - dragState.offsetX;
+      let top = e.clientY - dragState.offsetY;
+      left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, left));
+      top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, top));
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+    }
+
+    function onMouseUp() {
+      dragState.dragging = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.userSelect = '';
+    }
+
+    headerEl.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragState.dragging = true;
+      const rect = panel.getBoundingClientRect();
+      dragState.offsetX = e.clientX - rect.left;
+      dragState.offsetY = e.clientY - rect.top;
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+      document.body.style.userSelect = 'none';
+    });
+
+    // Touch support
+    function onTouchMove(e) {
+      if (!dragState.dragging) return;
+      const t = e.touches[0];
+      let left = t.clientX - dragState.offsetX;
+      let top = t.clientY - dragState.offsetY;
+      left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, left));
+      top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, top));
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+    }
+
+    function onTouchEnd() {
+      dragState.dragging = false;
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onTouchEnd);
+    }
+
+    headerEl.addEventListener('touchstart', (e) => {
+      const t = e.touches[0];
+      dragState.dragging = true;
+      const rect = panel.getBoundingClientRect();
+      dragState.offsetX = t.clientX - rect.left;
+      dragState.offsetY = t.clientY - rect.top;
+      document.addEventListener('touchmove', onTouchMove, { passive: false });
+      document.addEventListener('touchend', onTouchEnd);
+    });
 
     panel.querySelector("#fab-connect").onclick = () => connectWebSocket();
     panel.querySelector("#fab-start").onclick = () => startCapture().catch(err => log("Start failed", err));
