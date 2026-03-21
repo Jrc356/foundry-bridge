@@ -3,8 +3,6 @@ import os
 from typing import Any, Optional
 
 from langchain.agents import create_agent
-from typing import Any, Optional, List
-import re
 
 from foundry_bridge.models import EntityType
 
@@ -30,9 +28,18 @@ Guidelines:
   the group name, a PC name, or "the party".
 - Loot entries must specify who acquired the item (use "the party" if shared).
 - Combat entries should name the encounter and describe its outcome briefly.
-- Important quotes must be verbatim lines from the transcripts. Transcripts are
-  formatted as "[ID:N][SPEAKER]: text"; include the N value as transcript_id in
-  the ImportantQuoteOutput and the SPEAKER value as speaker.
+- Important quotes must be verbatim lines from the transcripts. Only include
+    quotes that are meaningfully impactful to the scene — emotionally charged,
+    reveal character motivation, change the direction of the scene, mark a clear
+    decision, or otherwise "pack a punch." Examples of good quotes:
+    - "I will never forgive you!"
+    - "We must leave now — it's the only way."
+    - "The treasure is in the chest under the statue."
+    Examples of bad quotes to omit: "uh, okay", "thanks", short filler words,
+    routine greetings, or background chatter that doesn't advance plot or tone.
+    Prefer at most 4 well-chosen quotes per note. Transcripts are formatted as
+    "[ID:N][SPEAKER]: text"; include the N value as `transcript_id` and SPEAKER
+    as `speaker` for each ImportantQuoteOutput.
 - Entities are NPCs, locations, quests, items, or factions — never player characters.
 - Events are a catch-all for notable story moments not captured in other fields (e.g. "Party arrived at the city of Neverwinter").
 - Open new threads only for unresolved mysteries or plot hooks that emerged this session.
