@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import signal
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -17,6 +18,9 @@ HOST = "0.0.0.0"
 WS_PORT = int(__import__("os").environ.get("WS_PORT", "8765"))
 HTTP_PORT = int(__import__("os").environ.get("HTTP_PORT", "8766"))
 
+# Connection timeout: close if no messages received in 30 seconds
+CONNECTION_TIMEOUT_SECS = 30
+
 
 @dataclass
 class ConnectionState:
@@ -24,6 +28,7 @@ class ConnectionState:
     client_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     last_audio_header: Optional[dict] = None
     game_id: Optional[int] = None
+    last_activity_time: float = field(default_factory=time.time)  # Track idle time
 
 
 connection_states: dict[ServerConnection, ConnectionState] = {}
@@ -55,11 +60,14 @@ async def unregister_connection(ws: ServerConnection) -> None:
 
 
 async def handle_json_message(state: ConnectionState, data: dict) -> None:
+    state.last_activity_time = time.time()  # Update activity tracking
     msg_type = data.get("type")
     logger.debug("Received message type=%r from client %s", msg_type, state.client_id)
+    
     if msg_type == "audio":
         state.last_audio_header = data
         return
+    
     if msg_type == "game_identify":
         hostname = data.get("hostname", "")
         world_id = data.get("world_id", "")
@@ -82,10 +90,49 @@ async def handle_json_message(state: ConnectionState, data: dict) -> None:
                 "reason": "hostname and world_id are required",
             })
         return  # do not pass game_identify to transcriber
+    
+    # Validate that game_id is set before processing other events
+    if state.game_id is None:
+        logger.warning(
+            "Dropping %s event: game_id not set (client=%s). Send game_identify first.",
+            msg_type,
+            state.client_id,
+        )
+        await safe_send_json(state.ws, {
+            "type": "error",
+            "message": "game_id not set; send game_identify first",
+        })
+        return
+    
+    # Validate participant_attached messages
+    if msg_type == "participant_attached":
+        participant_id = data.get("participantId")
+        name = data.get("name") or data.get("label")
+        if not participant_id or not name:
+            logger.warning(
+                "Invalid participant_attached message (client=%s): participantId=%s name=%s",
+                state.client_id,
+                participant_id,
+                name,
+            )
+            await safe_send_json(state.ws, {
+                "type": "error",
+                "message": "participant_attached missing participantId or name",
+            })
+            return
+        logger.info(
+            "Participant attached: client=%s participantId=%s name=%s game_id=%s",
+            state.client_id,
+            participant_id,
+            name,
+            state.game_id,
+        )
+    
     await transcriber.handle_event(data)
 
 
 async def handle_binary_message(state: ConnectionState, payload: bytes) -> None:
+    state.last_activity_time = time.time()  # Update activity tracking
     header = state.last_audio_header
     if header is None or state.game_id is None:
         logger.warning(
@@ -147,6 +194,35 @@ async def handler(ws: ServerConnection) -> None:
         await unregister_connection(ws)
 
 
+async def _monitor_connection_timeouts() -> None:
+    """Monitor active connections and close any that have been idle for too long."""
+    while True:
+        try:
+            await asyncio.sleep(10)  # Check every 10 seconds
+            now = time.time()
+            timed_out = []
+            
+            for ws, state in list(connection_states.items()):
+                idle_time = now - state.last_activity_time
+                if idle_time > CONNECTION_TIMEOUT_SECS:
+                    timed_out.append((ws, state.client_id, idle_time))
+            
+            for ws, client_id, idle_time in timed_out:
+                logger.warning(
+                    "Connection timeout: client=%s idle_time=%.1fs",
+                    client_id,
+                    idle_time,
+                )
+                try:
+                    await ws.close(code=1000, reason=f"idle timeout ({idle_time:.0f}s)")
+                except Exception as e:
+                    logger.debug("Error closing timed-out connection %s: %s", client_id, e)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.exception("Error in connection timeout monitor: %s", exc)
+
+
 async def _handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     request_line = (await reader.readline()).decode(errors="replace")
     parts = request_line.split(" ")
@@ -193,11 +269,22 @@ async def _main() -> None:
     loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_handle_signal()))
     loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_handle_signal()))
 
-    async with serve(handler, HOST, WS_PORT, max_size=None) as ws_server:
-        _ws_server = ws_server
-        logger.info("server ready")
-        async with health_server:
-            await ws_server.wait_closed()
+    # Start connection timeout monitor
+    timeout_monitor_task = asyncio.create_task(_monitor_connection_timeouts())
+    logger.info("Connection timeout monitor started (timeout=%ds)", CONNECTION_TIMEOUT_SECS)
+
+    try:
+        async with serve(handler, HOST, WS_PORT, max_size=None) as ws_server:
+            _ws_server = ws_server
+            logger.info("server ready")
+            async with health_server:
+                await ws_server.wait_closed()
+    finally:
+        timeout_monitor_task.cancel()
+        try:
+            await timeout_monitor_task
+        except asyncio.CancelledError:
+            logger.debug("Timeout monitor stopped")
 
     logger.info("server stopped")
 

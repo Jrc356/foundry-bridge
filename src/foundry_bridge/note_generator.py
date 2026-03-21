@@ -3,7 +3,8 @@ import os
 from typing import Any, Optional
 
 from langchain.agents import create_agent
-from pydantic import BaseModel, Field
+from typing import Any, Optional, List
+import re
 
 from foundry_bridge.models import EntityType
 
@@ -222,6 +223,11 @@ async def generate_note(
         e for e in note_output.entities
         if e.name.strip().lower() not in pc_names
     ]
+    # Post-filter important quotes with conservative heuristics to avoid noisy / trivial quotes
+    try:
+        note_output.important_quotes = _filter_important_quotes(note_output.important_quotes)
+    except Exception:
+        logger.exception("Error filtering important quotes; falling back to LLM output")
     logger.info(
         "LLM returned: entities=%d threads_opened=%d threads_closed=%d "
         "events=%d decisions=%d loot=%d combat=%d quotes=%d",
