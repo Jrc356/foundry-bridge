@@ -2,6 +2,10 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: foundry-postgres
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
     restart: unless-stopped
     environment:
       - POSTGRES_USER=foundry
@@ -21,6 +25,8 @@ services:
       context: .
       target: migrate
     container_name: foundry-migrate
+    env_file:
+      - .env
     restart: "no"
     depends_on:
       postgres:
@@ -34,6 +40,8 @@ services:
       context: .
       target: bridge
     container_name: foundry-bridge
+    env_file:
+      - .env
     ports:
       - "8765:8765"
       - "8766:8766"
@@ -46,14 +54,13 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://foundry:${POSTGRES_PASSWORD:-foundry}@postgres:5432/foundry_bridge
-      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - MODEL_PROVIDER=${MODEL_PROVIDER:-openai}
       - MODEL=${MODEL:-gpt-5.4}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - NOTE_CADENCE_MINUTES=${NOTE_CADENCE_MINUTES:-10}
       - WS_PORT=${WS_PORT:-8765}
       - HTTP_PORT=${HTTP_PORT:-8766}
       - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      - LOG_COLOR=${LOG_COLOR:-true}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8766/health"]
       interval: 10s
