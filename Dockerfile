@@ -26,8 +26,3 @@ CMD ["/app/.venv/bin/foundry-bridge"]
 # ── Migrate ───────────────────────────────────────────────────────────────────
 FROM bridge AS migrate
 CMD ["/app/.venv/bin/alembic", "upgrade", "head"]
-
-# ── Transcriber ───────────────────────────────────────────────────────────────
-FROM bridge AS transcriber
-RUN uv sync --frozen --extra transcriber --python /usr/local/bin/python3.11
-CMD ["/app/.venv/bin/foundry-bridge-transcriber"]

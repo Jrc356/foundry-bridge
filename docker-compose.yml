@@ -16,24 +16,6 @@ services:
       retries: 5
       start_period: 10s
 
-  bridge:
-    build:
-      context: .
-      target: bridge
-    container_name: foundry-bridge
-    ports:
-      - "8765:8765"
-      - "8766:8766"
-    restart: unless-stopped
-    environment:
-      - PYTHONUNBUFFERED=1
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8766/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
   migrate:
     build:
       context: .
@@ -47,24 +29,33 @@ services:
       - DATABASE_URL=postgresql://foundry:${POSTGRES_PASSWORD:-foundry}@postgres:5432/foundry_bridge
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
 
-  transcriber:
+  bridge:
     build:
       context: .
-      target: transcriber
-    container_name: foundry-transcriber
+      target: bridge
+    container_name: foundry-bridge
+    ports:
+      - "8765:8765"
+      - "8766:8766"
     restart: unless-stopped
     depends_on:
-      bridge:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
       - PYTHONUNBUFFERED=1
-      - BRIDGE_URI=ws://bridge:8765
-      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - DATABASE_URL=postgresql://foundry:${POSTGRES_PASSWORD:-foundry}@postgres:5432/foundry_bridge
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - MODEL_PROVIDER=${MODEL_PROVIDER:-openai}
+      - MODEL=${MODEL:-gpt-5.4}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - NOTE_CADENCE_MINUTES=${NOTE_CADENCE_MINUTES:-10}
+      - WS_PORT=${WS_PORT:-8765}
+      - HTTP_PORT=${HTTP_PORT:-8766}
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
     healthcheck:
-      test: ["CMD", "/app/.venv/bin/python", "-m", "foundry_bridge.health_check"]
+      test: ["CMD", "curl", "-f", "http://localhost:8766/health"]
       interval: 10s
       timeout: 5s
       retries: 3

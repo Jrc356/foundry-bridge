@@ -2,36 +2,33 @@ import asyncio
 import json
 import logging
 import signal
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 from websockets.asyncio.server import ServerConnection, serve
 
+from foundry_bridge import note_taker, transcriber
+from foundry_bridge.db import get_or_create_game
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 HOST = "0.0.0.0"
-PORT = 8765
-HEALTH_PORT = 8766
+WS_PORT = int(__import__("os").environ.get("WS_PORT", "8765"))
+HTTP_PORT = int(__import__("os").environ.get("HTTP_PORT", "8766"))
 
 
 @dataclass
 class ConnectionState:
     ws: ServerConnection
-    role: Optional[str] = None
-    client_id: str = ""
+    client_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     last_audio_header: Optional[dict] = None
-    metadata: dict = field(default_factory=dict)
+    game_id: Optional[int] = None
 
 
-ingest_clients: set[ServerConnection] = set()
-subscriber_clients: set[ServerConnection] = set()
 connection_states: dict[ServerConnection, ConnectionState] = {}
 
-
-def make_client_id(ws: ServerConnection) -> str:
-    remote = getattr(ws, "remote_address", None)
-    return f"{id(ws)}:{remote}"
+_ws_server = None
 
 
 async def safe_send_json(ws: ServerConnection, payload: dict) -> bool:
@@ -42,159 +39,90 @@ async def safe_send_json(ws: ServerConnection, payload: dict) -> bool:
         return False
 
 
-async def broadcast_json(payload: dict) -> None:
-    if not subscriber_clients:
-        return
-
-    dead = []
-    message = json.dumps(payload)
-
-    for ws in subscriber_clients:
-        try:
-            await ws.send(message)
-        except Exception:
-            dead.append(ws)
-
-    for ws in dead:
-        subscriber_clients.discard(ws)
-        connection_states.pop(ws, None)
-
-
-async def broadcast_audio(header: dict, payload: bytes) -> None:
-    if not subscriber_clients:
-        return
-
-    dead = []
-    header_msg = json.dumps(header)
-
-    for ws in subscriber_clients:
-        try:
-            await ws.send(header_msg)
-            await ws.send(payload)
-        except Exception:
-            dead.append(ws)
-
-    for ws in dead:
-        subscriber_clients.discard(ws)
-        connection_states.pop(ws, None)
-
-
 async def register_connection(ws: ServerConnection) -> ConnectionState:
-    state = ConnectionState(ws=ws, client_id=make_client_id(ws))
+    state = ConnectionState(ws=ws)
     connection_states[ws] = state
     return state
 
 
 async def unregister_connection(ws: ServerConnection) -> None:
     state = connection_states.pop(ws, None)
-    ingest_clients.discard(ws)
-    subscriber_clients.discard(ws)
-
-    if state and state.role == "ingest":
-        await broadcast_json({
-            "type": "bridge_connection_closed",
-            "role": state.role,
-            "clientId": state.client_id,
+    if state:
+        await transcriber.handle_event({
+            "type": "participant_detached",
+            "participantId": state.client_id,
         })
 
 
 async def handle_json_message(state: ConnectionState, data: dict) -> None:
     msg_type = data.get("type")
-
-    if msg_type == "hello":
-        role = data.get("role")
-        if role not in {"ingest", "subscriber"}:
-            await safe_send_json(state.ws, {
-                "type": "error",
-                "message": "hello.role must be 'ingest' or 'subscriber'",
-            })
-            return
-
-        state.role = role
-        state.metadata = data
-
-        if role == "ingest":
-            ingest_clients.add(state.ws)
+    logger.debug("Received message type=%r from client %s", msg_type, state.client_id)
+    if msg_type == "audio":
+        state.last_audio_header = data
+        return
+    if msg_type == "game_identify":
+        hostname = data.get("hostname", "")
+        world_id = data.get("world_id", "")
+        name = data.get("name", hostname)
+        if hostname and world_id:
+            # World-switch: destroy existing SpeakerWorker before changing game_id
+            if state.game_id is not None:
+                await transcriber.handle_event({
+                    "type": "participant_detached",
+                    "participantId": state.client_id,
+                })
+            game = await get_or_create_game(hostname=hostname, world_id=world_id, name=name)
+            state.game_id = game.id
+            await safe_send_json(state.ws, {"type": "game_identify_ack", "game_id": state.game_id})
+            logger.info("Game identified: %s/%s (id=%d)", hostname, world_id, game.id)
         else:
-            subscriber_clients.add(state.ws)
-
-        await safe_send_json(state.ws, {
-            "type": "hello_ack",
-            "role": role,
-            "clientId": state.client_id,
-        })
-
-        if role == "ingest":
-            await broadcast_json({
-                "type": "bridge_connection_opened",
-                "role": role,
-                "clientId": state.client_id,
-                "metadata": data,
+            logger.warning("game_identify missing hostname or world_id: %r", data)
+            await safe_send_json(state.ws, {
+                "type": "game_identify_nack",
+                "reason": "hostname and world_id are required",
             })
-
-        logging.info("registered %s client %s", role, state.client_id)
-        return
-
-    if state.role == "ingest":
-        if msg_type == "audio":
-            state.last_audio_header = data
-            return
-
-        await broadcast_json({
-            "type": "ingest_event",
-            "clientId": state.client_id,
-            "event": data,
-        })
-        return
-
-    if state.role == "subscriber":
-        await safe_send_json(state.ws, {
-            "type": "warning",
-            "message": "subscriber messages are ignored except hello",
-        })
-        return
-
-    await safe_send_json(state.ws, {
-        "type": "error",
-        "message": "send hello first",
-    })
+        return  # do not pass game_identify to transcriber
+    await transcriber.handle_event(data)
 
 
 async def handle_binary_message(state: ConnectionState, payload: bytes) -> None:
-    if state.role != "ingest":
-        await safe_send_json(state.ws, {
-            "type": "error",
-            "message": "binary messages are only valid for ingest clients",
-        })
+    header = state.last_audio_header
+    if header is None or state.game_id is None:
+        logger.warning(
+            "Dropping audio frame: last_audio_header=%s game_id=%s",
+            header,
+            state.game_id,
+        )
         return
 
-    header = state.last_audio_header
-    if not header or header.get("type") != "audio":
-        await safe_send_json(state.ws, {
-            "type": "error",
-            "message": "binary audio must follow an 'audio' JSON header",
-        })
-        return
+    _char_name = (
+        header.get("characterName")
+        or header.get("name")
+        or str(header.get("participantId", ""))
+    ).strip().lower()
+    if not _char_name:
+        logger.warning("Audio frame has no character_name fallback; using client_id")
+        _char_name = state.client_id
 
     out_header = {
-        "type": "audio_frame_header",
-        "clientId": state.client_id,
-        "participantId": header.get("participantId"),
-        "name": header.get("name"),
-        "sampleRate": header.get("sampleRate"),
-        "channels": header.get("channels"),
-        "samples": header.get("samples"),
-        "ts": header.get("ts"),
-        "encoding": "pcm_s16le",
-        "byteLength": len(payload),
+        **header,
+        "character_name": _char_name,
+        "participantId": state.client_id,
     }
 
-    await broadcast_audio(out_header, payload)
+    logger.debug(
+        "Audio frame: client=%s char=%r sample_rate=%s channels=%s bytes=%d",
+        state.client_id, _char_name,
+        out_header.get("sampleRate", 48000),
+        out_header.get("channels", 1),
+        len(payload),
+    )
+    await transcriber.handle_audio_frame(out_header, payload, game_id=state.game_id)
 
 
 async def handler(ws: ServerConnection) -> None:
     state = await register_connection(ws)
-    logging.info("connection opened %s", state.client_id)
+    logger.info("connection opened %s", state.client_id)
 
     try:
         async for message in ws:
@@ -202,6 +130,7 @@ async def handler(ws: ServerConnection) -> None:
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
+                    logger.warning("Ignoring malformed JSON from %s: %r", state.client_id, message[:200])
                     await safe_send_json(ws, {
                         "type": "error",
                         "message": "invalid JSON",
@@ -213,69 +142,69 @@ async def handler(ws: ServerConnection) -> None:
                 await handle_binary_message(state, message)
 
     except Exception as exc:
-        logging.info("connection closed %s (%s)", state.client_id, exc)
+        logger.info("connection closed %s (%s)", state.client_id, exc)
     finally:
         await unregister_connection(ws)
 
 
-async def health_check_handler(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-) -> None:
-    """Handle HTTP health check requests."""
-    try:
-        request_line = await reader.readline()
-        request_line = request_line.decode("utf-8").strip()
-
-        if not request_line.startswith("GET /health"):
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 13\r\n\r\nNot Found\r\n")
-            await writer.drain()
-            writer.close()
-            return
-
-        response_body = json.dumps({"status": "ok"})
-        response_body_bytes = response_body.encode("utf-8")
-        response = (
-            f"HTTP/1.1 200 OK\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Content-Length: {len(response_body_bytes)}\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-        ).encode("utf-8")
-        writer.write(response + response_body_bytes)
+async def _handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    request_line = (await reader.readline()).decode(errors="replace")
+    parts = request_line.split(" ")
+    method = parts[0] if parts else ""
+    path = parts[1] if len(parts) > 1 else ""
+    if method != "GET" or path != "/health":
+        writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
         await writer.drain()
-    except Exception as exc:
-        logging.error("health check handler error: %s", exc)
-    finally:
         writer.close()
-        await writer.wait_closed()
+        return
+    body = b'{"status": "ok"}'
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"\r\n" + body
+    )
+    writer.write(response)
+    await writer.drain()
+    writer.close()
 
 
 async def _main() -> None:
-    logging.info("starting ingestion bridge on ws://%s:%s", HOST, PORT)
+    global _ws_server
+    logger.info("starting ingestion bridge on ws://%s:%s", HOST, WS_PORT)
+
+    health_server = await asyncio.start_server(_handle_health, HOST, HTTP_PORT)
+    logger.info("health check server started on http://%s:%s/health", HOST, HTTP_PORT)
+
+    await transcriber.init()
+    note_taker.start_background_tasks()
+
     loop = asyncio.get_running_loop()
-    stop = loop.create_future()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set_result, None)
+    async def _handle_signal() -> None:
+        logger.info("Shutdown signal received")
+        if _ws_server is not None:
+            _ws_server.close()
+            await _ws_server.wait_closed()
+            logger.info("WebSocket server closed")
+        await note_taker.stop_background_tasks()
+        await transcriber.shutdown()
 
-    # Start health check HTTP server
-    health_server = await asyncio.start_server(
-        health_check_handler, HOST, HEALTH_PORT
-    )
-    logging.info("health check server started on http://%s:%s/health", HOST, HEALTH_PORT)
+    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_handle_signal()))
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_handle_signal()))
 
-    async with serve(handler, HOST, PORT, max_size=None) as server:
-        logging.info("server ready")
+    async with serve(handler, HOST, WS_PORT, max_size=None) as ws_server:
+        _ws_server = ws_server
+        logger.info("server ready")
         async with health_server:
-            await stop
-            logging.info("shutdown signal received, closing connections...")
-            server.close()
-            await server.wait_closed()
+            await ws_server.wait_closed()
 
-    logging.info("server stopped")
+    logger.info("server stopped")
 
 
 def main() -> None:
+    from foundry_bridge import setup_logging
+    setup_logging()
     asyncio.run(_main())
 
 

@@ -16,14 +16,10 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "alembic>=1.13",
-]
-
-[project.optional-dependencies]
-transcriber = [
-    "deepgram-sdk>=3.0",
+    "deepgram-sdk>=6.0.1,<7",
+    "langchain-openai>=1.0",
+    "langchain>=1.0",
 ]
 
 [project.scripts]
 foundry-bridge = "foundry_bridge.server:main"
-foundry-bridge-transcriber = "foundry_bridge.subscribers.transcriber:main"
-foundry-bridge-example = "foundry_bridge.subscribers.example:main"

@@ -179,6 +179,28 @@
     return audioCtx;
   }
 
+  function _sendGameIdentifyWhenReady() {
+    let attempts = 0;
+    const maxAttempts = 240; // 60 seconds at 250ms intervals
+    const timer = setInterval(() => {
+      attempts++;
+      const worldId = window.game?.world?.id;
+      if (worldId) {
+        clearInterval(timer);
+        sendJson({
+          type: "game_identify",
+          hostname: window.location.origin,
+          world_id: worldId,
+          name: window.game.world.name || worldId,
+        });
+        log("Sent game_identify for world: " + worldId);
+      } else if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        logError("game_identify not sent: Foundry world not available after 60s");
+      }
+    }, 250);
+  }
+
   function connectWebSocket() {
     clearTimeout(wsReconnectTimer);
 
@@ -192,13 +214,8 @@
 
     ws.onopen = () => {
       updateStatus("WS connected");
-      sendJson({
-        type: "hello",
-        role: "ingest",
-        source: "foundry-livekit-userscript",
-        userAgent: navigator.userAgent,
-        sessionHref: location.href,
-      });
+      log("WebSocket connected, waiting for Foundry world...");
+      _sendGameIdentifyWhenReady();
       if (ui.autoStart.checked && !bridgeState.running) {
         startCapture().catch(err => logError("start error", err));
       }
@@ -216,7 +233,22 @@
     };
 
     ws.onmessage = (event) => {
-      log("Server:", typeof event.data === "string" ? event.data : "[binary]");
+      if (typeof event.data === "string") {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "game_identify_ack") {
+            log("Game identified, game_id=" + data.game_id);
+          } else if (data.type === "game_identify_nack") {
+            logError("Game identify failed: " + data.reason);
+          } else {
+            log("Server:", event.data);
+          }
+        } catch (e) {
+          log("Server:", event.data);
+        }
+      } else {
+        log("Server:", "[binary]");
+      }
     };
   }
 
