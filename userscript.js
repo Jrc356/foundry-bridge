@@ -28,7 +28,9 @@
   let audioCtx = null;
   let ws = null;
   let syncTimer = null;
+  let heartbeatTimer = null;
   let wsReconnectTimer = null;
+  let syncInProgress = false;
 
   const activeParticipants = new Map();
 
@@ -145,28 +147,150 @@
     }
   }
 
-  function sendAudioFrame(meta, pcm16) {
-    sendJson({
-      type: "audio",
-      participantId: meta.participantId,
-      userId: meta.userId,
-      name: meta.label,
-      label: meta.label,
-      userName: meta.userName,
-      characterName: meta.characterName,
-      liveKitName: meta.liveKitName,
-      liveKitIdentity: meta.liveKitIdentity,
-      liveKitSid: meta.liveKitSid,
-      sampleRate: audioCtx.sampleRate,
-      channels: 1,
-      samples: pcm16.length,
-      ts: Date.now(),
-    });
-    sendBinary(pcm16.buffer);
+  // Send JSON with exponential backoff retry on failure
+  async function sendJsonWithRetry(obj, maxRetries = 3, initialDelayMs = 100) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        if (attempt < maxRetries) {
+          const delayMs = Math.min(initialDelayMs * (2 ** (attempt - 1)), 500);
+          logWarn(
+            `WebSocket not ready (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms`,
+          );
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+        logError(`Failed to send JSON after ${maxRetries} attempts:`, obj);
+        return false;
+      }
+
+      try {
+        ws.send(JSON.stringify(obj));
+        return true;
+      } catch (e) {
+        if (attempt < maxRetries) {
+          const delayMs = Math.min(initialDelayMs * (2 ** (attempt - 1)), 500);
+          logWarn(`Failed to send JSON (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms:`, e);
+          await new Promise(r => setTimeout(r, delayMs));
+        } else {
+          logError(`Failed to send JSON after ${maxRetries} attempts:`, e);
+          return false;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Send binary with exponential backoff retry on failure
+  async function sendBinaryWithRetry(buffer, maxRetries = 3, initialDelayMs = 100) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        if (attempt < maxRetries) {
+          const delayMs = Math.min(initialDelayMs * (2 ** (attempt - 1)), 500);
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+        logError(`Failed to send binary (${buffer.byteLength} bytes) after ${maxRetries} attempts`);
+        return false;
+      }
+
+      try {
+        ws.send(buffer);
+        return true;
+      } catch (e) {
+        if (attempt < maxRetries) {
+          const delayMs = Math.min(initialDelayMs * (2 ** (attempt - 1)), 500);
+          logWarn(
+            `Failed to send binary (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms:`,
+            e,
+          );
+          await new Promise(r => setTimeout(r, delayMs));
+        } else {
+          logError(`Failed to send binary after ${maxRetries} attempts:`, e);
+          return false;
+        }
+      }
+    }
+    return false;
+  }
+
+  function sendAudioFrame(meta, pcm16, wsRef) {
+    // Use provided ws reference or fall back to global (for backward compatibility)
+    const targetWs = wsRef || ws;
+    if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    try {
+      sendJson({
+        type: "audio",
+        participantId: meta.participantId,
+        userId: meta.userId,
+        name: meta.label,
+        label: meta.label,
+        userName: meta.userName,
+        characterName: meta.characterName,
+        liveKitName: meta.liveKitName,
+        liveKitIdentity: meta.liveKitIdentity,
+        liveKitSid: meta.liveKitSid,
+        sampleRate: audioCtx.sampleRate,
+        channels: 1,
+        samples: pcm16.length,
+        ts: Date.now(),
+      });
+      sendBinary(pcm16.buffer);
+      return true;
+    } catch (e) {
+      logWarn(`Failed to send audio frame for ${meta.label}:`, e);
+      return false;
+    }
   }
 
   function shouldSendAudioFrame(state) {
     return !!state?.participant?.isSpeaking;
+  }
+
+  // Safely cleanup audio processor and source for a participant state
+  function cleanupParticipantAudio(state) {
+    if (!state) return;
+
+    if (state.processor) {
+      try {
+        state.processor.disconnect();
+        logWarn(`Disconnected processor for ${state.meta.label}`);
+      } catch (e) {
+        logWarn(`Error disconnecting processor for ${state.meta.label}:`, e);
+      }
+      state.processor = null;
+    }
+
+    if (state.source) {
+      try {
+        state.source.disconnect();
+        logWarn(`Disconnected source for ${state.meta.label}`);
+      } catch (e) {
+        logWarn(`Error disconnecting source for ${state.meta.label}:`, e);
+      }
+      state.source = null;
+    }
+
+    if (state.mst) {
+      try {
+        state.mst.stop();
+      } catch (e) {
+        // Track may already be stopped, which is fine
+      }
+      state.mst = null;
+    }
+
+    // Remove track onended handler if present
+    if (state.trackEndedHandler) {
+      try {
+        if (state.mst) state.mst.removeEventListener('ended', state.trackEndedHandler);
+      } catch (e) {}
+      state.trackEndedHandler = null;
+    }
+
+    state.audioCleanedUp = true;
   }
 
   async function ensureAudioContext() {
@@ -262,77 +386,133 @@
   }
 
   function attachParticipant(participantId, participant) {
-    if (activeParticipants.has(participantId)) return;
+    let existingState = activeParticipants.get(participantId);
+
+    // Clean up any stale state before reattaching
+    if (existingState && existingState.audioCleanedUp === false) {
+      logWarn(`Cleaning up stale audio for ${participantId} before reattach`);
+      cleanupParticipantAudio(existingState);
+    }
+
+    // Skip if already properly attached with live audio
+    if (activeParticipants.has(participantId) && !existingState?.audioCleanedUp) {
+      return;
+    }
 
     const meta = getParticipantMetadata(participantId, participant);
     const pubs = getParticipantAudioPublications(participant);
-    if (!pubs.length) return;
+    if (!pubs.length) {
+      logWarn(`No audio publications for ${meta.label} (${participantId})`);
+      return;
+    }
 
     const mst = pubs.map(getMediaStreamTrackFromPublication).find(Boolean);
-    if (!mst) return;
+    if (!mst) {
+      logWarn(`No live audio track for ${meta.label} (${participantId})`);
+      return;
+    }
 
-    const stream = new MediaStream([mst]);
-    const source = audioCtx.createMediaStreamSource(stream);
-    const processor = audioCtx.createScriptProcessor(CONFIG.BUFFER_SIZE, 1, 1);
+    // Validate track is still live
+    if (mst.readyState !== "live") {
+      logWarn(
+        `Audio track not live for ${meta.label} (${participantId}), state=${mst.readyState}`,
+      );
+      return;
+    }
 
-    const state = {
-      participantId,
-      participant,
-      meta,
-      mst,
-      stream,
-      source,
-      processor,
-      sentFrames: 0,
-      skippedFrames: 0,
-    };
+    try {
+      const stream = new MediaStream([mst]);
+      const source = audioCtx.createMediaStreamSource(stream);
+      const processor = audioCtx.createScriptProcessor(CONFIG.BUFFER_SIZE, 1, 1);
 
-    processor.onaudioprocess = (event) => {
-      if (!bridgeState.running) return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      if (!shouldSendAudioFrame(state)) {
-        state.skippedFrames++;
-        return;
+      const state = {
+        participantId,
+        participant,
+        meta,
+        mst,
+        stream,
+        source,
+        processor,
+        wsRef: ws, // Store reference to current WebSocket
+        sentFrames: 0,
+        skippedFrames: 0,
+        audioCleanedUp: false,
+        trackEndedHandler: null,
+      };
+
+      processor.onaudioprocess = (event) => {
+        try {
+          if (!bridgeState.running) return;
+          if (!state.wsRef || state.wsRef.readyState !== WebSocket.OPEN) return;
+          if (!shouldSendAudioFrame(state)) {
+            state.skippedFrames++;
+            return;
+          }
+
+          const input = event.inputBuffer.getChannelData(0);
+          const pcm16 = float32ToPCM16(input);
+          const sent = sendAudioFrame(state.meta, pcm16, state.wsRef);
+          if (sent) {
+            state.sentFrames++;
+          }
+        } catch (e) {
+          logError(
+            `Error in audio processor for ${state.meta.label}:`,
+            e,
+          );
+        }
+      };
+
+      // Add handler for track ended event (network dropout, user disabled audio, etc)
+      const trackEndedHandler = () => {
+        logWarn(
+          `Audio track ended for ${state.meta.label} (${participantId}), detaching participant`,
+        );
+        detachParticipant(participantId);
+      };
+      state.trackEndedHandler = trackEndedHandler;
+      mst.addEventListener('ended', trackEndedHandler);
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      activeParticipants.set(participantId, state);
+
+      renderParticipants();
+      sendJsonWithRetry({
+        type: "participant_attached",
+        participantId,
+        userId: meta.userId,
+        name: meta.label,
+        label: meta.label,
+        userName: meta.userName,
+        characterName: meta.characterName,
+        liveKitName: meta.liveKitName,
+        liveKitIdentity: meta.liveKitIdentity,
+        liveKitSid: meta.liveKitSid,
+        ts: Date.now(),
+      }).catch(err => logError("Failed to send participant_attached", err));
+      log(`Attached ${meta.label} (${participantId})`);
+    } catch (e) {
+      logError(`Failed to attach participant ${meta.label} (${participantId}):`, e);
+      // Attempt cleanup of partially created state
+      if (activeParticipants.has(participantId)) {
+        const partial = activeParticipants.get(participantId);
+        cleanupParticipantAudio(partial);
+        activeParticipants.delete(participantId);
       }
-
-      const input = event.inputBuffer.getChannelData(0);
-      const pcm16 = float32ToPCM16(input);
-      sendAudioFrame(state.meta, pcm16);
-      state.sentFrames++;
-    };
-
-    source.connect(processor);
-    processor.connect(audioCtx.destination);
-
-    activeParticipants.set(participantId, state);
-
-    renderParticipants();
-    sendJson({
-      type: "participant_attached",
-      participantId,
-      userId: meta.userId,
-      name: meta.label,
-      label: meta.label,
-      userName: meta.userName,
-      characterName: meta.characterName,
-      liveKitName: meta.liveKitName,
-      liveKitIdentity: meta.liveKitIdentity,
-      liveKitSid: meta.liveKitSid,
-      ts: Date.now(),
-    });
-    log(`Attached ${meta.label} (${participantId})`);
+    }
   }
 
   function detachParticipant(participantId) {
     const state = activeParticipants.get(participantId);
     if (!state) return;
 
-    try { state.processor.disconnect(); } catch (e) { logWarn("Error disconnecting processor", e); }
-    try { state.source.disconnect(); } catch (e) { logWarn("Error disconnecting source", e); }
+    cleanupParticipantAudio(state);
 
     activeParticipants.delete(participantId);
     renderParticipants();
-    sendJson({
+    sendJsonWithRetry({
       type: "participant_detached",
       participantId,
       userId: state.meta.userId,
@@ -344,7 +524,7 @@
       liveKitIdentity: state.meta.liveKitIdentity,
       liveKitSid: state.meta.liveKitSid,
       ts: Date.now(),
-    });
+    }).catch(err => logError("Failed to send participant_detached", err));
     log(`Detached ${state.meta.label} (${participantId})`);
   }
 
@@ -378,6 +558,26 @@
     renderParticipants();
   }
 
+  // Heartbeat: detects orphaned participants (5s interval)
+  function heartbeatCheckOrphanedParticipants() {
+    const map = getParticipantsMap();
+    if (!map) return;
+
+    const orphanedIds = [];
+    for (const participantId of activeParticipants.keys()) {
+      if (!map.has(participantId)) {
+        orphanedIds.push(participantId);
+      }
+    }
+
+    if (orphanedIds.length > 0) {
+      logWarn(`Heartbeat detected ${orphanedIds.length} orphaned participant(s), detaching`);
+      for (const participantId of orphanedIds) {
+        detachParticipant(participantId);
+      }
+    }
+  }
+
   const bridgeState = {
     running: false,
     wantRunning: false,
@@ -399,7 +599,12 @@
     updateStatus("Capturing");
 
     clearInterval(syncTimer);
+    clearInterval(heartbeatTimer);
+    syncInProgress = false;
+
     syncTimer = setInterval(syncParticipants, CONFIG.POLL_MS);
+    heartbeatTimer = setInterval(heartbeatCheckOrphanedParticipants, 5000);
+
     syncParticipants();
 
     sendJson({
@@ -417,7 +622,9 @@
     bridgeState.running = false;
 
     clearInterval(syncTimer);
+    clearInterval(heartbeatTimer);
     syncTimer = null;
+    heartbeatTimer = null;
 
     for (const participantId of [...activeParticipants.keys()]) {
       detachParticipant(participantId);
@@ -660,6 +867,17 @@
   }
 
   waitForFoundry();
+
+  // Clean up on page unload/navigation
+  window.addEventListener("beforeunload", () => {
+    if (bridgeState.running) {
+      try {
+        stopCapture();
+      } catch (e) {
+        logError("Error during unload cleanup:", e);
+      }
+    }
+  });
 
   window.__foundryAudioBridge = {
     startCapture,
