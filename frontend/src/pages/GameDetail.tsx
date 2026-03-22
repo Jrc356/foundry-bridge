@@ -5,6 +5,7 @@ import {
   Dices,
   MessageCircle,
   ScrollText,
+  Search,
   Shield,
   Sparkles,
   Swords,
@@ -22,10 +23,12 @@ import LootTab from './tabs/LootTab'
 import NotesTab from './tabs/NotesTab'
 import PlayerCharactersTab from './tabs/PlayerCharactersTab'
 import QuotesTab from './tabs/QuotesTab'
+import SearchTab from './tabs/SearchTab'
 import ThreadsTab from './tabs/ThreadsTab'
 import TranscriptsTab from './tabs/TranscriptsTab'
 
 const TABS = [
+  { id: 'search', label: 'Search', icon: Search },
   { id: 'notes', label: 'Notes', icon: BookOpen },
   { id: 'entities', label: 'Entities', icon: Shield },
   { id: 'threads', label: 'Threads', icon: Sparkles },
@@ -68,6 +71,7 @@ export default function GameDetail() {
       <main className="flex-1 overflow-y-auto">
         <Routes>
           <Route index element={<Navigate to="notes" replace />} />
+          <Route path="search" element={<SearchTab gameId={gameId} />} />
           <Route path="notes" element={<NotesTab gameId={gameId} />} />
           <Route path="entities" element={<EntitiesTab gameId={gameId} />} />
           <Route path="threads" element={<ThreadsTab gameId={gameId} />} />

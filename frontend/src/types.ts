@@ -75,6 +75,16 @@ export interface Event {
   created_at: string;
 }
 
+export interface SearchResults {
+  entities: Entity[];
+  notes: Note[];
+  threads: Thread[];
+  events: Event[];
+  decisions: Decision[];
+  loot: Loot[];
+  combat: CombatUpdate[];
+}
+
 export interface CombatUpdate {
   id: number;
   game_id: number;

@@ -9,6 +9,7 @@ import type {
   Loot,
   Note,
   PlayerCharacter,
+  SearchResults,
   Thread,
   Transcript,
 } from './types';
@@ -88,3 +89,9 @@ export const deleteQuote = (id: number) => api.delete(`/quotes/${id}`);
 // ── Player characters ──────────────────────────────────────────────────────
 export const getPlayerCharacters = (gameId: number) =>
   api.get<PlayerCharacter[]>(`/games/${gameId}/player_characters`).then(r => r.data);
+
+// ── Search ─────────────────────────────────────────────────────────────────
+export const searchGame = (gameId: number, query: string, contentType?: string, limit?: number) =>
+  api.get<SearchResults>(`/games/${gameId}/search`, {
+    params: { q: query, ...(contentType ? { content_type: contentType } : {}), ...(limit !== undefined ? { limit } : {}) },
+  }).then(r => r.data);

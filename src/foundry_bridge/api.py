@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 import sqlalchemy as sa
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from foundry_bridge.db import AsyncSessionLocal
+from foundry_bridge.db import (
+    AsyncSessionLocal,
+    search_combat,
+    search_decisions,
+    search_entities,
+    search_events,
+    search_loot,
+    search_notes,
+    search_open_threads,
+    search_resolved_threads,
+)
 from foundry_bridge.models import (
     CombatUpdate,
     Decision,
@@ -567,6 +578,99 @@ async def list_player_characters(game_id: int, db: AsyncSession = Depends(get_db
         .order_by(PlayerCharacter.character_name)
     )
     return result.scalars().all()
+
+
+# ── Semantic search ──────────────────────────────────────────────────────────
+
+_SEARCHABLE_TYPES = frozenset({"entities", "notes", "threads", "events", "decisions", "loot", "combat"})
+
+
+class SearchResultsOut(BaseModel):
+    entities: list[EntityOut] = []
+    notes: list[NoteOut] = []
+    threads: list[ThreadOut] = []
+    events: list[EventOut] = []
+    decisions: list[DecisionOut] = []
+    loot: list[LootOut] = []
+    combat: list[CombatUpdateOut] = []
+
+
+@app.get("/api/games/{game_id}/search", response_model=SearchResultsOut)
+async def search_game(
+    game_id: int,
+    q: str = Query(..., min_length=1),
+    content_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=8, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if content_type is not None and content_type not in _SEARCHABLE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content_type. Must be one of: {', '.join(sorted(_SEARCHABLE_TYPES))}",
+        )
+
+    run_all = content_type is None
+
+    async def _entities():
+        if run_all or content_type == "entities":
+            return await search_entities(game_id, q, k=limit)
+        return []
+
+    async def _notes():
+        if run_all or content_type == "notes":
+            return await search_notes(game_id, q, k=limit)
+        return []
+
+    async def _threads():
+        if run_all or content_type == "threads":
+            open_, resolved = await asyncio.gather(
+                search_open_threads(game_id, q, k=limit),
+                search_resolved_threads(game_id, q, k=limit),
+            )
+            seen: dict[int, object] = {}
+            for t in open_ + resolved:
+                if t.id not in seen:
+                    seen[t.id] = t
+            return list(seen.values())[:limit]
+        return []
+
+    async def _events():
+        if run_all or content_type == "events":
+            return await search_events(game_id, q, k=limit)
+        return []
+
+    async def _decisions():
+        if run_all or content_type == "decisions":
+            return await search_decisions(game_id, q, k=limit)
+        return []
+
+    async def _loot():
+        if run_all or content_type == "loot":
+            return await search_loot(game_id, q, k=limit)
+        return []
+
+    async def _combat():
+        if run_all or content_type == "combat":
+            return await search_combat(game_id, q, k=limit)
+        return []
+
+    entities, notes, threads, events, decisions, loot, combat = await asyncio.gather(
+        _entities(), _notes(), _threads(), _events(), _decisions(), _loot(), _combat()
+    )
+
+    return SearchResultsOut(
+        entities=entities,
+        notes=notes,
+        threads=threads,
+        events=events,
+        decisions=decisions,
+        loot=loot,
+        combat=combat,
+    )
 
 
 # ── Static files (React SPA) ──────────────────────────────────────────────────
