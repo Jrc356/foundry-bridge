@@ -19,6 +19,17 @@ class ColoredFormatter(logging.Formatter):
         levelname = record.levelname
         color_code = self.COLORS.get(levelname, "")
         formatted = super().format(record)
+        
+        # Append extra fields if present
+        extra_fields = {k: v for k, v in record.__dict__.items() 
+                       if k not in ('name', 'msg', 'args', 'created', 'filename', 'funcName', 
+                                    'levelname', 'levelno', 'lineno', 'module', 'msecs', 'message', 
+                                    'pathname', 'process', 'processName', 'relativeCreated', 'thread', 
+                                    'threadName', 'exc_info', 'exc_text', 'stack_info', 'asctime')}
+        if extra_fields:
+            extra_str = " ".join(f"{k}={v}" for k, v in extra_fields.items())
+            formatted = f"{formatted}\t{extra_str}"
+        
         if color_code:
             formatted = f"{color_code}{formatted}{self.COLORS['RESET']}"
         return formatted

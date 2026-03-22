@@ -290,9 +290,7 @@ async def write_note_pipeline_result(
                 entity_stmt = entity_stmt.on_conflict_do_update(
                     constraint="uq_entities_game_entity_type_name",
                     set_={
-                        "description": sa.func.concat(
-                            Entity.description, "\n\n", entity_stmt.excluded.description
-                        ),
+                        "description": entity_stmt.excluded.description,
                         "updated_at": sa.func.now(),
                     },
                 ).returning(Entity.id)

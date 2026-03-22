@@ -54,7 +54,7 @@ services:
         condition: service_healthy
     environment:
       - PYTHONUNBUFFERED=1
-      - AGENT_DEBUG=${AGENT_DEBUG:-true}
+      - AGENT_DEBUG=${AGENT_DEBUG:-false}
       - DATABASE_URL=postgresql://foundry:${POSTGRES_PASSWORD:-foundry}@postgres:5432/foundry_bridge
       - MODEL_PROVIDER=${MODEL_PROVIDER:-openai}
       - MODEL=${MODEL:-gpt-5.4}

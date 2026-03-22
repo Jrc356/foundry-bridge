@@ -39,6 +39,10 @@ REQUIRED tool-use rules:
   with a relevant query to check if the thread is already open. If found, do not re-open it.
 - Before adding any IDs to `threads_closed`, you MUST call `search_open_threads` with
   a relevant query to find the correct thread IDs. Do NOT guess or invent IDs.
+- Before outputting any entity, you MUST call `search_entities` with the entity's name
+  to check if it already exists. If found, write a single updated description that
+  incorporates both the prior description and any new information from this session.
+  Do NOT omit previously known details — only add to or refine them.
 - Avoid calling the same tool with identical queries twice. Use prior tool results
   instead of re-searching.
 
@@ -106,7 +110,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_entities returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching entities found."
             logger.info(
@@ -146,7 +150,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_open_threads returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching open threads found."
             logger.info(
@@ -186,7 +190,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_resolved_threads returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching resolved threads found."
             logger.info(
@@ -228,7 +232,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_events returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching events found."
             logger.info(
@@ -268,7 +272,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_past_notes returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching notes found."
             logger.info(
@@ -308,7 +312,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_decisions returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching decisions found."
             logger.info(
@@ -348,7 +352,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_loot returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching loot found."
             logger.info(
@@ -388,7 +392,7 @@ def make_game_tools(game_id: int) -> list:
             if result_count == 0:
                 logger.info(
                     "search_combat returned no results",
-                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
                 )
                 return "No matching combat records found."
             logger.info(
