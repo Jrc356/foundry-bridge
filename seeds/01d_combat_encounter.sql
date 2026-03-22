@@ -373,7 +373,163 @@ BEGIN
 
       (_gid, 'sess-dm-001',     'DM',     111,
        'You make arrangements with Moran to keep copies of the documents. You hide your iron key in a safe place at the inn. Moran agrees that if you do not return within ten days, he will send word to the regional lords about the cult and the ritual sites. You rest that night with purpose — tomorrow begins the real fight against the Veil-Walker cult. As sleep takes you, each of you wonders what horrors await in the Blackwood Forest.',
-       1154.3, 1173.4, 0.99, false);
+       1154.3, 1173.4, 0.99, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 112,
+       'The next morning at dawn, we gather our supplies and horses. Before we ride out, I want to check with the Hartwells. Are they safe? Is there anything they can tell us about the cultists intentions?',
+       1173.5, 1183.8, 0.96, false),
+
+      (_gid, 'sess-dm-001',     'DM',     113,
+       'Thomas Hartwell meets with you at the inn. He is grateful but haunted by the experience. He tells you that the High Priest spoke of three pillars — three rituals that must be completed to open the gateway. He heard fragments of conversation mentioning something called the Eclipse Convergence. In three nights, there will be a lunar eclipse. The High Priest mentioned it was significant, a time of weakened barriers between worlds.',
+       1183.9, 1207.3, 0.99, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   114,
+       'Three nights. That matches the timeline in the journal. We have three nights before the eclipse and they need all three rituals completed. We need to stop at least two of them to prevent the gateway from opening.',
+       1207.4, 1219.6, 0.97, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    115,
+       'We head north toward Blackwood Forest as planned. As we ride, I keep the maps close and study the route to the ritual site marked on them. I want to arrive with maximum daylight remaining so we can scout the location before nightfall.',
+       1219.7, 1232.1, 0.96, false),
+
+      (_gid, 'sess-dm-001',     'DM',     116,
+       'You ride hard through the day. The landscape transitions from cultivated farmland to wild forest. By afternoon, the trees grow denser and taller. The sky darkens beneath the thick canopy. Strange sounds echo through the forest — not quite animal, not quite wind. The air feels wrong, charged with magical energy. You sense you are getting close to the ritual site.',
+       1232.2, 1255.1, 0.99, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 117,
+       'We move more cautiously now. I suggest we leave the horses hidden and proceed on foot. Combat in a forest on horseback is ineffective. We need mobility and stealth.',
+       1255.2, 1264.8, 0.95, false),
+
+      (_gid, 'sess-dm-001',     'DM',     118,
+       'You secure the horses in a dense thicket and proceed on foot. After about an hour of careful movement through the forest, you notice the trees ahead are dying. Their bark is black and rotted. The earth beneath them is barren. You smell sulfur and decay. Ahead, the forest opens into a clearing where massive stones form a circle. At the center is another silver sigil carved gigantically into the earth.',
+       1264.9, 1287.4, 0.99, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   119,
+       'The megaliths, the dying trees, this place is a nexus of dark power. I cast Detect Magic to see what we are dealing with.',
+       1287.5, 1296.2, 0.96, false),
+
+      (_gid, 'sess-dm-001',     'DM',     120,
+       'Zara, the magical aura here is almost overwhelming. Multiple overlapping auras — necromancy, conjuration, transmutation, and something else you have never encountered before. Evocation perhaps, but twisted. Ancient. The ritual site is radiating power in preparation for the ceremony. And you sense life — cultists in the shadows between the stones. At least a dozen. They are waiting.',
+       1296.3, 1318.7, 0.99, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    121,
+       'A dozen? We are outnumbered three to one. We need a strategy. Can we stealth in closer? Can we disrupt the ritual without engaging in full combat?',
+       1318.8, 1328.4, 0.95, false),
+
+      (_gid, 'sess-dm-001',     'DM',     122,
+       'That is a good question. You have some options. You could attempt to infiltrate the ritual site, find the ritual components, and destroy them before the cultists fully mobilize. You could attempt a direct assault. You could try to disrupt the ritual magic itself if you have access to such spells. Or you could set up an ambush — let the cultists see you and draw them into a trap. What do you want to do?',
+       1328.5, 1349.1, 0.98, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 123,
+       'I prefer direct confrontation, but I am not suicidal. Let us get closer and assess. Maybe we can identify a leader, someone important, and focus on eliminating them quickly. Zara, can you use your magic to thin out their numbers before combat starts?',
+       1349.2, 1361.6, 0.96, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   124,
+       'If we can get close enough without being seen, I can prepare a spell — Fireball again, or maybe something with more control. Chain Lightning might work in a cluster of enemies.',
+       1361.7, 1372.9, 0.95, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    126,
+       'I suggest we move around the clearing edge, staying in shadow and behind trees. I will scout ahead and see if I can find a good vantage point.',
+       1372.10, 1382.5, 0.94, false),
+
+      (_gid, 'sess-dm-001',     'DM',     125,
+       'You move cautiously around the perimeter of the clearing. Make Stealth checks.',
+       1372.6, 1376.0, 0.93, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 127,
+       'I rolled a 16.',
+       1382.6, 1384.2, 0.91, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   128,
+       'I got a 19.',
+       1384.3, 1385.8, 0.90, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    129,
+       'I rolled a 22. I am sneaking better than both of you.',
+       1385.9, 1388.7, 0.92, false),
+
+      (_gid, 'sess-dm-001',     'DM',     130,
+       'Pip, you move like a shadow, completely undetected. Zara, you avoid direct sight lines, hidden behind trees. Aldric, one cultist glimpses movement from the corner of his eye but is uncertain. You reach a ridge overlooking the ritual site. Below, you see the cultists more clearly — a dozen robed figures, and at the center, a woman in crimson robes. She radiates power. This must be the High Priestess.',
+       1388.8, 1409.1, 0.99, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   131,
+       'The woman in crimson has powerful auras surrounding her. She is clearly the leader and likely more dangerous than the High Priest we fought before. We need to focus on her.',
+       1409.2, 1420.4, 0.96, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 132,
+       'When we attack, we attack her directly and decisively. The followers will be easier to manage once their leader falls. I am ready to charge when you give the signal.',
+       1420.5, 1431.2, 0.95, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    133,
+       'Wait. I want to check if there are any other exits from this clearing or escape routes the cultists might use. Let me scout the far side.',
+       1431.3, 1440.8, 0.94, false),
+
+      (_gid, 'sess-dm-001',     'DM',     134,
+       'You move further around the clearing, staying hidden. You spot another path — an ancient overgrown road that leads into deeper forest. It is carved into the earth, suggesting it has been used for centuries. This could be where the cultists came from and where they might flee.',
+       1440.9, 1456.3, 0.97, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    135,
+       'There is an escape route to the north through that old road. We should position someone to guard it when combat starts. Otherwise, they will flee and we will not stop all the rituals.',
+       1456.4, 1467.2, 0.96, false),
+
+      (_gid, 'sess-dm-001',     'DM',     136,
+       'You are thinking strategically. You have identified a critical point. If you want to capture or eliminate the cultists, you need to block their escape. This presents a problem — you are three people trying to divide your forces.',
+       1467.3, 1479.8, 0.98, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   137,
+       'We cannot split up equally. But we might be able to use magic to our advantage. I can cast Hold Person or similar spells to trap cultists. Aldric is our strongest combatant. Pip, can you use your stealth to get behind them and block that road?',
+       1479.9, 1494.1, 0.96, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    138,
+       'I can try, but alone I cannot stop a dozen cultists if they all flee toward me at once. I would rely on traps or obstacles. Even with my skills, odds are not in my favor.',
+       1494.2, 1505.4, 0.95, false),
+
+      (_gid, 'sess-dm-001',     'DM',     139,
+       'Fair assessment. What you could do is place caltrops or spikes on the road to slow their escape. You could also stay hidden and pick off stragglers as they flee. But you would not be able to hold a full retreat by yourself.',
+       1505.5, 1520.1, 0.97, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 140,
+       'Then our priority is to incapacitate the High Priestess and create chaos among the cultists. If their leader falls, morale breaks. Zara unleashes magic, I charge the leader, and Pip flanks them to disrupt their formation. In the resulting chaos, we can pick apart the rest.',
+       1520.2, 1537.6, 0.96, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   141,
+       'Agreed. I position myself on this rise for maximum spell coverage. When you are in position, Aldric, I will open with Chain Lightning to strike multiple cultists. That should catch their attention and start the combat.',
+       1537.7, 1550.8, 0.95, false),
+
+      (_gid, 'sess-dm-001',     'DM',     142,
+       'You spend the next ten minutes preparing. Aldric and Pip move into positions — Aldric to rush the High Priestess, Pip to flank from the side. Zara readies her spell. As the sun dips lower toward the horizon, the cultists begin a low chanting. Their ceremony is starting. This is your moment.',
+       1550.9, 1570.8, 0.99, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   143,
+       'I cast Chain Lightning, targeting the High Priestess first, then letting it arc to nearby cultists. Attack roll... 20 to hit the High Priestess.',
+       1570.9, 1580.1, 0.95, false),
+
+      (_gid, 'sess-dm-001',     'DM',     144,
+       'Yes, you hit her. The lightning courses through her body and she screams. The electricity arcs to two cultists near her and they fall convulsing. Three cultists down before melee even begins. Combat starts. Roll initiative, everyone.',
+       1580.2, 1591.5, 0.98, false),
+
+      (_gid, 'sess-aldric-001', 'Aldric', 145,
+       'I rolled a 17.',
+       1591.6, 1593.1, 0.91, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   146,
+       'I got a 20.',
+       1593.2, 1594.6, 0.90, false),
+
+      (_gid, 'sess-pip-001',    'Pip',    147,
+       'I rolled an 18.',
+       1594.7, 1596.1, 0.89, false),
+
+      (_gid, 'sess-dm-001',     'DM',     148,
+       'The High Priestess rolled an 19. Initiative order: Zara, then the High Priestess, then Pip, then Aldric. Then the remaining cultists act. This will be a challenging fight. You are facing nine cultists and a powerful High Priestess in a ritual location of immense magical power. Your success or failure here determines whether the eclipse convergence proceeds. The stakes have never been higher. What do you do, Zara, on your first turn?',
+       1596.2, 1621.0, 0.99, false),
+
+      (_gid, 'sess-zara-001',   'Zara',   149,
+       'I take my turn. I move 30 feet closer to the High Priestess and cast Counterspell-ready. Focusing, waiting to see what she does, what magic she might attempt to cast.',
+       1621.1, 1633.2, 0.96, false),
+
+      (_gid, 'sess-dm-001',     'DM',     150,
+       'As your second turn begins — we will return to Zara when her next turn comes up. You have prepared Counterspell. Now the High Priestess acts. She rises to her feet despite the lingering scorch marks from the Chain Lightning. Her eyes begin to glow with that same black void-like darkness you saw in the first High Priest. She raises her hands and begins a ritual incantation. Dark energy pools around her. She is casting something powerful, something that threatens the whole battlefield. Zara, this is your moment. Counterspell or let it happen?',
+       1633.3, 1660.3, 0.99, false);
 
 END;
 $$;
