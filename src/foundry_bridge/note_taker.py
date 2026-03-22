@@ -2,24 +2,27 @@ import asyncio
 import logging
 import os
 import re
+from datetime import datetime
+
+from langgraph.errors import GraphRecursionError
 
 from foundry_bridge.db import (
-    get_entities_for_game,
-    get_events_for_game,
+    _get_embed_model,
+    _write_embeddings_for_pipeline_result,
+    embed_unembedded_rows,
     get_game_ids_with_unprocessed_transcripts,
-    get_open_threads_for_game,
     get_player_characters_for_game,
     get_recent_notes_for_game,
-    get_resolved_threads_for_game,
     get_unprocessed_transcripts_for_game,
     upsert_player_characters,
     write_note_pipeline_result,
 )
-from foundry_bridge.note_generator import generate_note, init_agent
+from foundry_bridge.note_generator import generate_note, validate_config
 
 logger = logging.getLogger(__name__)
 
 NOTE_CADENCE_MINUTES = int(os.getenv("NOTE_CADENCE_MINUTES", "10"))
+RECENT_NOTES_LIMIT = int(os.getenv("RECENT_NOTES_LIMIT", "3"))
 
 # Per-game asyncio locks; never evicted.
 _game_locks: dict[int, asyncio.Lock] = {}
@@ -32,11 +35,18 @@ _UUID_RE = re.compile(
 
 
 def start_background_tasks() -> None:
-    """Spawn the polling loop. Eagerly initializes the LLM agent to validate config at startup."""
-    init_agent()  # Raise immediately if agent config (e.g. OPENAI_API_KEY) is invalid
+    """Spawn the polling loop and pre-load the FastEmbed model."""
     global _task
-    _task = asyncio.create_task(_polling_loop())
+    _task = asyncio.create_task(_startup_and_poll())
     logger.info("Note taker background task started (cadence=%dm)", NOTE_CADENCE_MINUTES)
+
+
+async def _startup_and_poll() -> None:
+    """Pre-load the FastEmbed ONNX model, validate LLM config, then start the polling loop."""
+    await asyncio.to_thread(_get_embed_model)  # blocks ~270 MB disk read off the event loop
+    logger.info("FastEmbed model loaded, starting polling loop")
+    validate_config()  # fail fast if API key is missing, after model is confirmed loadable
+    await _polling_loop()
 
 
 async def stop_background_tasks() -> None:
@@ -62,19 +72,28 @@ async def stop_background_tasks() -> None:
 async def _polling_loop() -> None:
     while True:
         try:
+            poll_time = datetime.now().isoformat()
             game_ids = await get_game_ids_with_unprocessed_transcripts()
-            logger.debug("Poll: %d game(s) with unprocessed transcripts", len(game_ids))
+            locked_games = []
+            
+            logger.info("[%s] Poll cycle: %d game(s) with unprocessed transcripts", poll_time, len(game_ids))
+            
             for gid in game_ids:
                 lock = _game_locks.setdefault(gid, asyncio.Lock())
                 if lock.locked():
-                    logger.debug("Game %d pipeline already running, skipping", gid)
+                    locked_games.append(gid)
                     continue
                 t = asyncio.create_task(_run_pipeline_locked(gid, lock))
                 _inflight_tasks.add(t)
                 t.add_done_callback(_inflight_tasks.discard)
+            
+            if locked_games:
+                logger.info("[%s] Skipped %d game(s) due to in-progress pipelines: %s", poll_time, len(locked_games), locked_games)
         except Exception:
             logger.exception("Error in note taker polling loop")
-        await asyncio.sleep(NOTE_CADENCE_MINUTES * 60)
+        next_poll_seconds = NOTE_CADENCE_MINUTES * 60
+        logger.debug("Sleeping %d seconds until next poll", next_poll_seconds)
+        await asyncio.sleep(next_poll_seconds)
 
 
 async def _run_pipeline_locked(game_id: int, lock: asyncio.Lock) -> None:
@@ -100,26 +119,36 @@ async def _run_pipeline(game_id: int) -> None:
     await upsert_player_characters(game_id, pc_names)
     player_characters = await get_player_characters_for_game(game_id)
 
-    recent_notes = await get_recent_notes_for_game(game_id, limit=3)
-    entities = await get_entities_for_game(game_id)
-    open_threads = await get_open_threads_for_game(game_id)
-    resolved_threads = await get_resolved_threads_for_game(game_id)
-    game_events = await get_events_for_game(game_id)
+    recent_notes = await get_recent_notes_for_game(game_id, limit=RECENT_NOTES_LIMIT)
 
+    # Step 0: Catch-up — ensure all existing rows have embeddings before agent searches
+    await embed_unembedded_rows(game_id)
+
+    start_time = datetime.now().isoformat()
     logger.info(
-        "Running LLM pipeline for game %d (%d transcripts, %d entities, %d open threads, %d recent notes)",
-        game_id, len(transcripts), len(entities), len(open_threads), len(recent_notes),
+        "[%s] Starting LLM pipeline for game %d (%d transcripts, %d recent notes)",
+        start_time, game_id, len(transcripts), len(recent_notes),
     )
     logger.debug("PC names for game %d: %s", game_id, pc_names if pc_names else "(none filtered from transcripts)")
-    note_output = await generate_note(
-        transcripts, entities, recent_notes, open_threads, resolved_threads,
-        game_events=game_events, player_characters=player_characters,
-    )
+
+    try:
+        note_output = await generate_note(
+            game_id=game_id,
+            transcripts=transcripts,
+            recent_notes=recent_notes,
+            player_characters=player_characters,
+        )
+    except GraphRecursionError:
+        logger.warning(
+            "Note generation aborted (recursion limit) for game %d; will retry on next poll",
+            game_id,
+        )
+        return  # transcripts NOT marked processed — will retry
 
     source_ids = [t.id for t in transcripts]
     # Coerce thread_resolutions keys from str to int (JSON only supports string keys)
     thread_resolutions_int = {int(k): v for k, v in note_output.thread_resolutions.items() if k.isdigit()}
-    await write_note_pipeline_result(
+    pipeline_result = await write_note_pipeline_result(
         game_id=game_id,
         note_summary=note_output.summary,
         source_transcript_ids=source_ids,
@@ -135,4 +164,6 @@ async def _run_pipeline(game_id: int) -> None:
         combat_updates=[c.model_dump() for c in note_output.combat_updates],
         important_quotes=[q.model_dump() for q in note_output.important_quotes],
     )
-    logger.info("Note stored for game %d", game_id)
+    await _write_embeddings_for_pipeline_result(pipeline_result)
+    end_time = datetime.now().isoformat()
+    logger.info("[%s] Note stored for game %d (completion time: %s)", end_time, game_id, end_time)

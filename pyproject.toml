@@ -19,6 +19,8 @@ dependencies = [
     "deepgram-sdk>=6.0.1,<7",
     "langchain-openai>=1.0",
     "langchain>=1.0",
+    "pgvector>=0.4.2",
+    "fastembed>=0.7",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
 ]

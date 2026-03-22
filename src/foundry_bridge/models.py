@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Optional
 
 import sqlalchemy as sa
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -18,6 +19,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+VECTOR_DIM = 768
 
 
 class Base(DeclarativeBase):
@@ -83,6 +86,7 @@ class Note(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
 
 class Entity(Base):
@@ -99,6 +103,8 @@ class Entity(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -123,6 +129,7 @@ class Thread(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -156,6 +163,7 @@ class Event(Base):
     game_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("games.id"), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
     __table_args__ = (UniqueConstraint("game_id", "text", name="uq_events_game_text"),)
 
 
@@ -167,6 +175,7 @@ class Decision(Base):
     decision: Mapped[str] = mapped_column(Text, nullable=False)
     made_by: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
 
 class Loot(Base):
@@ -176,6 +185,7 @@ class Loot(Base):
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
     acquired_by: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
     __table_args__ = (UniqueConstraint("game_id", "item_name", "acquired_by", name="uq_loot_game_item_acquirer"),)
 
 
@@ -204,6 +214,7 @@ class CombatUpdate(Base):
     encounter: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
 
 class ImportantQuote(Base):

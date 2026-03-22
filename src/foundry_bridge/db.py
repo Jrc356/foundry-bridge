@@ -1,5 +1,11 @@
+import asyncio
 import logging
 import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -9,6 +15,7 @@ from foundry_bridge.models import (
     CombatUpdate,
     Decision,
     Entity,
+    EntityType,
     Event,
     Game,
     ImportantQuote,
@@ -31,6 +38,27 @@ if _DATABASE_URL.startswith("postgresql://"):
 
 _engine = create_async_engine(_DATABASE_URL, pool_pre_ping=True)
 AsyncSessionLocal = async_sessionmaker(_engine, expire_on_commit=False)
+
+# ── FastEmbed model singleton ──────────────────────────────────────────────────
+
+_FASTEMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5")
+_embed_model: "TextEmbedding | None" = None
+
+
+def _get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        from fastembed import TextEmbedding  # lazy import to avoid startup overhead
+        _embed_model = TextEmbedding(model_name=_FASTEMBED_MODEL, threads=2)
+    return _embed_model
+
+
+async def _embed_texts(texts: list[str], *, as_query: bool = False) -> list[list[float]]:
+    """Embed a batch of texts in a thread pool to avoid blocking the event loop."""
+    prefix = "search_query: " if as_query else "search_document: "
+    prefixed = [prefix + t for t in texts]
+    model = _get_embed_model()
+    return await asyncio.to_thread(lambda: [v.tolist() for v in model.embed(prefixed)])
 
 
 async def get_or_create_game(hostname: str, world_id: str, name: str) -> Game:
@@ -193,6 +221,18 @@ async def get_events_for_game(game_id: int) -> list[Event]:
         return list(result.scalars().all())
 
 
+@dataclass
+class PipelineWriteResult:
+    note_id: int
+    entity_ids: list[int]
+    new_thread_ids: list[int]
+    resolved_thread_ids: list[int]
+    event_ids: list[int]
+    decision_ids: list[int]
+    loot_ids: list[int]
+    combat_ids: list[int]
+
+
 async def write_note_pipeline_result(
     *,
     game_id: int,
@@ -206,7 +246,7 @@ async def write_note_pipeline_result(
     loot: list[dict],            # list of {"item_name": str, "acquired_by": str}
     combat_updates: list[dict],  # list of {"encounter": str, "outcome": str}
     important_quotes: list[dict],
-) -> None:
+) -> PipelineWriteResult:
     """Atomically persist all outputs from a note-generation pipeline run.
 
     On any exception the transaction rolls back; transcripts remain unprocessed and
@@ -219,6 +259,14 @@ async def write_note_pipeline_result(
         len(threads_opened), len(threads_closed), len(events),
         len(decisions), len(loot), len(combat_updates), len(important_quotes),
     )
+    inserted_entity_ids: list[int] = []
+    inserted_thread_ids: list[int] = []
+    resolved_thread_ids: list[int] = []
+    inserted_event_ids: list[int] = []
+    inserted_decision_ids: list[int] = []
+    inserted_loot_ids: list[int] = []
+    inserted_combat_ids: list[int] = []
+
     async with AsyncSessionLocal() as session:
         async with session.begin():
             # 1. Create the note header row
@@ -231,7 +279,7 @@ async def write_note_pipeline_result(
             await session.flush()  # populate note.id before inserting children
             note_id = note.id
 
-            # 2. Upsert entities (accumulate descriptions)
+            # 2. Upsert entities (accumulate descriptions); collect IDs via RETURNING
             for e in entities:
                 entity_stmt = pg_insert(Entity).values(
                     game_id=game_id,
@@ -247,31 +295,50 @@ async def write_note_pipeline_result(
                         ),
                         "updated_at": sa.func.now(),
                     },
-                )
-                await session.execute(entity_stmt)
+                ).returning(Entity.id)
+                entity_result = await session.execute(entity_stmt)
+                entity_id = entity_result.scalar()
+                if entity_id is not None:
+                    inserted_entity_ids.append(entity_id)
 
-            # 3. Create new threads
+            # 3. Create new threads; collect IDs via flush
             for text in threads_opened:
-                session.add(Thread(game_id=game_id, text=text))
+                new_thread = Thread(game_id=game_id, text=text)
+                session.add(new_thread)
+                await session.flush()
+                inserted_thread_ids.append(new_thread.id)
 
-            # 4. Resolve threads (only for this game; log unknown/already-resolved IDs)
+            # 4. Resolve threads (three-tier validation: missing / cross-game / already resolved)
             if threads_closed:
                 closed_ids = [t["id"] for t in threads_closed]
                 resolutions = {t["id"]: t.get("resolution", "") for t in threads_closed}
-                valid_result = await session.execute(
-                    sa.select(Thread.id).where(
-                        Thread.id.in_(closed_ids),
-                        Thread.game_id == game_id,
-                        Thread.is_resolved == False,  # noqa: E712
+                all_result = await session.execute(
+                    sa.select(Thread.id, Thread.game_id, Thread.is_resolved).where(
+                        Thread.id.in_(closed_ids)
                     )
                 )
-                valid_ids = {row[0] for row in valid_result.all()}
-                invalid_ids = set(closed_ids) - valid_ids
-                if invalid_ids:
-                    logger.warning(
-                        "game %d: thread IDs %s not found or already resolved; skipping",
-                        game_id, invalid_ids,
-                    )
+                thread_lookup = {row[0]: (row[1], row[2]) for row in all_result.all()}
+                valid_ids: set[int] = set()
+                for tid in closed_ids:
+                    if tid not in thread_lookup:
+                        logger.warning(
+                            "game %d: thread_close: ID %d not found; skipping",
+                            game_id, tid,
+                        )
+                    elif thread_lookup[tid][0] != game_id:
+                        logger.error(
+                            "game %d: thread_close: ID %d belongs to game %d "
+                            "(cross-game access violation); skipping",
+                            game_id, tid, thread_lookup[tid][0],
+                        )
+                    elif thread_lookup[tid][1]:  # already resolved
+                        logger.warning(
+                            "game %d: thread_close: ID %d already resolved; skipping",
+                            game_id, tid,
+                        )
+                    else:
+                        valid_ids.add(tid)
+                resolved_thread_ids = list(valid_ids)
                 for tid in valid_ids:
                     await session.execute(
                         sa.update(Thread)
@@ -284,14 +351,17 @@ async def write_note_pipeline_result(
                         )
                     )
 
-            # 5. Insert decisions (each linked directly to the note)
+            # 5. Insert decisions; collect IDs via flush
             for d in decisions:
-                session.add(Decision(
+                d_obj = Decision(
                     game_id=game_id, note_id=note_id,
                     decision=d["decision"], made_by=d["made_by"],
-                ))
+                )
+                session.add(d_obj)
+                await session.flush()
+                inserted_decision_ids.append(d_obj.id)
 
-            # 6. Upsert events + m2m link to note
+            # 6. Upsert events + m2m link to note; collect IDs
             for text in events:
                 event_stmt = (
                     pg_insert(Event)
@@ -309,13 +379,14 @@ async def write_note_pipeline_result(
                         )
                     )
                     event_id = existing.scalar_one()
+                inserted_event_ids.append(event_id)
                 await session.execute(
                     pg_insert(notes_events_table)
                     .values(note_id=note_id, event_id=event_id)
                     .on_conflict_do_nothing()
                 )
 
-            # 7. Upsert loot + m2m link to note
+            # 7. Upsert loot + m2m link to note; collect IDs
             for item in loot:
                 acquired_by = item.get("acquired_by") or "the party"
                 loot_stmt = pg_insert(Loot).values(
@@ -337,18 +408,22 @@ async def write_note_pipeline_result(
                         )
                     )
                     loot_id = existing.scalar_one()
+                inserted_loot_ids.append(loot_id)
                 await session.execute(
                     pg_insert(notes_loot_table)
                     .values(note_id=note_id, loot_id=loot_id)
                     .on_conflict_do_nothing()
                 )
 
-            # 8. Insert combat_updates (each linked directly to the note)
+            # 8. Insert combat_updates; collect IDs via flush
             for c in combat_updates:
-                session.add(CombatUpdate(
+                c_obj = CombatUpdate(
                     game_id=game_id, note_id=note_id,
                     encounter=c["encounter"], outcome=c["outcome"],
-                ))
+                )
+                session.add(c_obj)
+                await session.flush()
+                inserted_combat_ids.append(c_obj.id)
 
             # 9. Insert important_quotes (validate transcript_id against current batch)
             valid_transcript_ids = set(source_transcript_ids)
@@ -376,3 +451,449 @@ async def write_note_pipeline_result(
         "Note pipeline result committed: game_id=%d note_id=%d",
         game_id, note_id,
     )
+    return PipelineWriteResult(
+        note_id=note_id,
+        entity_ids=inserted_entity_ids,
+        new_thread_ids=inserted_thread_ids,
+        resolved_thread_ids=resolved_thread_ids,
+        event_ids=inserted_event_ids,
+        decision_ids=inserted_decision_ids,
+        loot_ids=inserted_loot_ids,
+        combat_ids=inserted_combat_ids,
+    )
+
+
+# ── Hybrid vector+text search helpers ─────────────────────────────────────────
+
+_RRF_K = 60  # standard Reciprocal Rank Fusion constant
+
+
+def _rrf_merge(vector_rows: list, text_rows: list, *, k: int) -> list:
+    """Merge two ranked lists via Reciprocal Rank Fusion; return top-k unique items."""
+    scores: dict[int, float] = {}
+    seen: dict[int, object] = {}
+    for rank, row in enumerate(vector_rows, start=1):
+        scores[row.id] = scores.get(row.id, 0.0) + 1.0 / (_RRF_K + rank)
+        seen[row.id] = row
+    for rank, row in enumerate(text_rows, start=1):
+        scores[row.id] = scores.get(row.id, 0.0) + 1.0 / (_RRF_K + rank)
+        seen[row.id] = row
+    ranked = sorted(scores, key=scores.__getitem__, reverse=True)
+    return [seen[rid] for rid in ranked[:k]]
+
+
+async def search_entities(
+    game_id: int,
+    query: str,
+    *,
+    entity_type: Optional[EntityType] = None,
+    k: int = 8,
+) -> list[Entity]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+    type_filter = [Entity.entity_type == entity_type] if entity_type else []
+
+    async def _vec() -> list[Entity]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Entity)
+                .where(Entity.game_id == game_id, Entity.embedding.is_not(None), *type_filter)
+                .order_by(Entity.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Entity]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Entity)
+                .where(
+                    Entity.game_id == game_id,
+                    sa.func.to_tsvector(
+                        "english",
+                        sa.func.concat(
+                            Entity.entity_type, " ", Entity.name, " ",
+                            sa.func.coalesce(Entity.description, ""),
+                        ),
+                    ).op("@@")(sa.func.plainto_tsquery("english", query)),
+                    *type_filter,
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_open_threads(game_id: int, query: str, k: int = 6) -> list[Thread]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[Thread]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Thread)
+                .where(
+                    Thread.game_id == game_id,
+                    Thread.is_resolved == False,  # noqa: E712
+                    Thread.embedding.is_not(None),
+                )
+                .order_by(Thread.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Thread]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Thread)
+                .where(
+                    Thread.game_id == game_id,
+                    Thread.is_resolved == False,  # noqa: E712
+                    sa.func.to_tsvector("english", Thread.text)
+                    .op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_resolved_threads(game_id: int, query: str, k: int = 6) -> list[Thread]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[Thread]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Thread)
+                .where(
+                    Thread.game_id == game_id,
+                    Thread.is_resolved == True,  # noqa: E712
+                    Thread.embedding.is_not(None),
+                )
+                .order_by(Thread.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Thread]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Thread)
+                .where(
+                    Thread.game_id == game_id,
+                    Thread.is_resolved == True,  # noqa: E712
+                    sa.func.to_tsvector("english", Thread.text)
+                    .op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_events(game_id: int, query: str, k: int = 8) -> list[Event]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[Event]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Event)
+                .where(Event.game_id == game_id, Event.embedding.is_not(None))
+                .order_by(Event.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Event]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Event)
+                .where(
+                    Event.game_id == game_id,
+                    sa.func.to_tsvector("english", Event.text)
+                    .op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_notes(game_id: int, query: str, k: int = 4) -> list[Note]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[Note]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Note)
+                .where(Note.game_id == game_id, Note.embedding.is_not(None))
+                .order_by(Note.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Note]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Note)
+                .where(
+                    Note.game_id == game_id,
+                    sa.func.to_tsvector("english", Note.summary)
+                    .op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_decisions(game_id: int, query: str, k: int = 6) -> list[Decision]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[Decision]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Decision)
+                .where(Decision.game_id == game_id, Decision.embedding.is_not(None))
+                .order_by(Decision.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Decision]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Decision)
+                .where(
+                    Decision.game_id == game_id,
+                    sa.func.to_tsvector(
+                        "english",
+                        sa.func.concat(
+                            sa.func.coalesce(Decision.made_by, ""), " ", Decision.decision
+                        ),
+                    ).op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_loot(game_id: int, query: str, k: int = 6) -> list[Loot]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[Loot]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Loot)
+                .where(Loot.game_id == game_id, Loot.embedding.is_not(None))
+                .order_by(Loot.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Loot]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Loot)
+                .where(
+                    Loot.game_id == game_id,
+                    sa.func.to_tsvector(
+                        "english",
+                        sa.func.concat(
+                            Loot.item_name, " ", sa.func.coalesce(Loot.acquired_by, "")
+                        ),
+                    ).op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+async def search_combat(game_id: int, query: str, k: int = 6) -> list[CombatUpdate]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
+
+    async def _vec() -> list[CombatUpdate]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(CombatUpdate)
+                .where(CombatUpdate.game_id == game_id, CombatUpdate.embedding.is_not(None))
+                .order_by(CombatUpdate.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[CombatUpdate]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(CombatUpdate)
+                .where(
+                    CombatUpdate.game_id == game_id,
+                    sa.func.to_tsvector(
+                        "english",
+                        sa.func.concat(CombatUpdate.encounter, " ", CombatUpdate.outcome),
+                    ).op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
+# ── Embedding maintenance helpers ──────────────────────────────────────────────
+
+async def embed_unembedded_rows(game_id: int) -> None:
+    """Best-effort: compute embeddings for any rows that are missing them.
+
+    Called before each agent run so the search tools always have fresh data.
+    Silently swallows errors — rows will be retried on the next pipeline run.
+
+    Structured in three phases so ONNX inference runs outside any DB transaction.
+    """
+    table_specs = [
+        (Entity,       lambda e: f"[{e.entity_type}] {e.name}: {e.description}"),
+        (Thread,       lambda t: f"{t.text} \u2014 Resolution: {t.resolution or ''}" if t.is_resolved else t.text),
+        (Event,        lambda e: e.text),
+        (Note,         lambda n: n.summary),
+        (Decision,     lambda d: f"Decision by {d.made_by}: {d.decision}"),
+        (Loot,         lambda loot: f"Loot acquired by {loot.acquired_by}: {loot.item_name}"),
+        (CombatUpdate, lambda c: f"Combat encounter: {c.encounter} \u2014 Outcome: {c.outcome}"),
+    ]
+    try:
+        # Phase 1: Collect (model_cls, pk, text) via short read session
+        to_embed: list[tuple[type, int, str]] = []
+        async with AsyncSessionLocal() as session:
+            for model_cls, text_fn in table_specs:
+                result = await session.execute(
+                    sa.select(model_cls).where(
+                        model_cls.game_id == game_id,
+                        model_cls.embedding.is_(None),
+                    )
+                )
+                for row in result.scalars().all():
+                    to_embed.append((model_cls, row.id, text_fn(row)))
+
+        if not to_embed:
+            return
+
+        # Phase 2: ONNX inference — outside any DB transaction
+        model_classes, pks, texts = zip(*to_embed)
+        vecs = await _embed_texts(list(texts))
+
+        # Phase 3: Short write transaction
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                for model_cls, pk, vec in zip(model_classes, pks, vecs):
+                    obj = await session.get(model_cls, pk)
+                    if obj is not None:
+                        obj.embedding = vec  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("embed_unembedded_rows failed for game %d", game_id)
+
+
+async def _write_embeddings_for_pipeline_result(result: PipelineWriteResult) -> None:
+    """Post-commit: compute and store embeddings for all rows from a pipeline run.
+
+    Best-effort: failures leave rows with embedding IS NULL, which embed_unembedded_rows
+    will fill on the next pipeline run.
+
+    Structured in three phases to keep the DB transaction short:
+      1. Short read — collect (model_class, pk, text) tuples.
+      2. ONNX inference — outside any DB transaction.
+      3. Short write — update embedding columns.
+    """
+    try:
+        # Phase 1: Collect (model_class, pk, text) with a short read session (no explicit txn needed)
+        to_embed: list[tuple[type, int, str]] = []
+        async with AsyncSessionLocal() as session:
+            # Entities: re-fetch to get actual stored description after upsert merge
+            for eid in result.entity_ids:
+                entity = await session.get(Entity, eid)
+                if entity:
+                    to_embed.append((Entity, eid, f"[{entity.entity_type}] {entity.name}: {entity.description}"))
+
+            # New threads
+            for tid in result.new_thread_ids:
+                thread = await session.get(Thread, tid)
+                if thread:
+                    to_embed.append((Thread, tid, thread.text))
+
+            # Resolved threads: embed combined text with resolution
+            for tid in result.resolved_thread_ids:
+                thread = await session.get(Thread, tid)
+                if thread:
+                    combined = f"{thread.text} — Resolution: {thread.resolution or ''}"
+                    to_embed.append((Thread, tid, combined))
+
+            # Events
+            for eid in result.event_ids:
+                event = await session.get(Event, eid)
+                if event:
+                    to_embed.append((Event, eid, event.text))
+
+            # Note
+            note = await session.get(Note, result.note_id)
+            if note:
+                to_embed.append((Note, result.note_id, note.summary))
+
+            # Decisions
+            for did in result.decision_ids:
+                decision = await session.get(Decision, did)
+                if decision:
+                    to_embed.append((Decision, did, f"Decision by {decision.made_by}: {decision.decision}"))
+
+            # Loot
+            for lid in result.loot_ids:
+                loot_row = await session.get(Loot, lid)
+                if loot_row:
+                    to_embed.append((Loot, lid, f"Loot acquired by {loot_row.acquired_by}: {loot_row.item_name}"))
+
+            # Combat
+            for cid in result.combat_ids:
+                combat = await session.get(CombatUpdate, cid)
+                if combat:
+                    to_embed.append((CombatUpdate, cid, f"Combat encounter: {combat.encounter} — Outcome: {combat.outcome}"))
+
+        if not to_embed:
+            return
+
+        # Phase 2: ONNX inference — outside any DB transaction
+        model_classes, pks, texts = zip(*to_embed)
+        vecs = await _embed_texts(list(texts))
+
+        # Phase 3: Short write transaction
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                for model_cls, pk, vec in zip(model_classes, pks, vecs):
+                    obj = await session.get(model_cls, pk)
+                    if obj is not None:
+                        obj.embedding = vec  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception(
+            "Failed to write embeddings for pipeline result (note_id=%d); "
+            "rows will be retried by embed_unembedded_rows",
+            result.note_id,
+        )

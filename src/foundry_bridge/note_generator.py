@@ -1,10 +1,15 @@
 import logging
 import os
-from typing import Any, Optional
+import time
+from typing import Optional
 
 from langchain.agents import create_agent
+from langchain_core.tools import StructuredTool
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
+from pydantic import Field as PydanticField
 
+import foundry_bridge.db as db
 from foundry_bridge.models import EntityType
 
 logger = logging.getLogger(__name__)
@@ -15,13 +20,27 @@ extract structured session notes from speech-to-text transcripts of a play sessi
 
 You will receive:
 - **Transcripts**: lines of dialogue and narration from the current batch, formatted
-  as "[SPEAKER]: text"
+  as "[ID:N][SPEAKER]: text"
 - **Recent notes**: structured notes from the last few sessions (for context)
-- **Open threads**: unresolved plot threads with their IDs; close any that were resolved
-  this session by including their ID in `threads_closed`
-- **Resolved threads**: previously closed threads — do NOT re-open these as new threads
-- **Known entities**: NPCs, locations, items, factions, and quests already recorded
 - **Player characters**: names of the PCs — do NOT output these as entities
+
+Use the following tools to look up relevant campaign history on demand:
+- `search_entities`: Find existing NPCs, locations, quests, items, or factions
+- `search_open_threads`: Find open unresolved plot threads by topic
+- `search_resolved_threads`: Verify whether a thread was already resolved
+- `search_events`: Find past story events for context or deduplication
+- `search_past_notes`: Find broader historical session context
+- `search_decisions`: Find past party decisions
+- `search_loot`: Find previously acquired loot or items
+- `search_combat`: Find past combat encounters
+
+REQUIRED tool-use rules:
+- Before adding any entry to `threads_opened`, you MUST call `search_open_threads`
+  with a relevant query to check if the thread is already open. If found, do not re-open it.
+- Before adding any IDs to `threads_closed`, you MUST call `search_open_threads` with
+  a relevant query to find the correct thread IDs. Do NOT guess or invent IDs.
+- Avoid calling the same tool with identical queries twice. Use prior tool results
+  instead of re-searching.
 
 Guidelines:
 - Write the summary in past tense, 3–6 sentences.
@@ -49,7 +68,403 @@ Guidelines:
   (e.g. "The party found the missing key in the dungeon chest.").
 """
 
-_agent: Any = None
+_MODEL_STR = f"{os.environ.get('MODEL_PROVIDER', 'openai')}:{os.environ.get('MODEL', 'gpt-5.4')}"
+
+_STRUCTURED_OUTPUT_PROMPT = (
+    "Extract the structured note data from the conversation above. "
+    "Fill in all fields based on what was discussed and the tool results retrieved."
+)
+
+
+# ── Search tools (per-call) ─────────────────────────────────────────────────
+
+class _SearchInput(BaseModel):
+    query: str = PydanticField(description="Natural language search query")
+
+
+class _EntitySearchInput(BaseModel):
+    query: str = PydanticField(description="Natural language search query")
+    entity_type: Optional[EntityType] = PydanticField(
+        default=None,
+        description="Optional filter: npc, location, quest, item, faction, or other. Leave blank to search all.",
+    )
+
+
+def make_game_tools(game_id: int) -> list:
+    """Return the 8 search tools bound to a specific game_id."""
+
+    async def search_entities(query: str, entity_type: Optional[EntityType] = None) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_entities invoked",
+            extra={"game_id": game_id, "query": query, "entity_type": entity_type},
+        )
+        try:
+            rows = await db.search_entities(game_id, query, entity_type=entity_type)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_entities returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching entities found."
+            logger.info(
+                "search_entities succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(f"[{r.entity_type}] {r.name}: {r.description}" for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_entities failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching entities: {str(e)}"
+
+    async def search_open_threads(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_open_threads invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_open_threads(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_open_threads returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching open threads found."
+            logger.info(
+                "search_open_threads succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(f"ID {r.id}: {r.text}" for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_open_threads failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching open threads: {str(e)}"
+
+    async def search_resolved_threads(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_resolved_threads invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_resolved_threads(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_resolved_threads returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching resolved threads found."
+            logger.info(
+                "search_resolved_threads succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(
+                f"ID {r.id}: {r.text} (resolved: {r.resolution or 'no details'})" for r in rows
+            )
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_resolved_threads failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching resolved threads: {str(e)}"
+
+    async def search_events(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_events invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_events(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_events returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching events found."
+            logger.info(
+                "search_events succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(r.text for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_events failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching events: {str(e)}"
+
+    async def search_past_notes(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_past_notes invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_notes(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_past_notes returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching notes found."
+            logger.info(
+                "search_past_notes succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(f"[{r.created_at}] {r.summary}" for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_past_notes failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching past notes: {str(e)}"
+
+    async def search_decisions(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_decisions invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_decisions(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_decisions returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching decisions found."
+            logger.info(
+                "search_decisions succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(f"{r.made_by}: {r.decision}" for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_decisions failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching decisions: {str(e)}"
+
+    async def search_loot(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_loot invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_loot(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_loot returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching loot found."
+            logger.info(
+                "search_loot succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(f"{r.acquired_by}: {r.item_name}" for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_loot failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching loot: {str(e)}"
+
+    async def search_combat(query: str) -> str:
+        start_time = time.time()
+        logger.debug(
+            "search_combat invoked",
+            extra={"game_id": game_id, "query": query},
+        )
+        try:
+            rows = await db.search_combat(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_combat returned no results",
+                    extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed},
+                )
+                return "No matching combat records found."
+            logger.info(
+                "search_combat succeeded",
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "result_count": result_count,
+                    "elapsed_sec": elapsed,
+                },
+            )
+            return "\n".join(f"{r.encounter}: {r.outcome}" for r in rows)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_combat failed",
+                exc_info=True,
+                extra={
+                    "game_id": game_id,
+                    "query": query,
+                    "elapsed_sec": elapsed,
+                    "error": str(e),
+                },
+            )
+            return f"Error searching combat: {str(e)}"
+
+    return [
+        StructuredTool.from_function(
+            coroutine=search_entities,
+            name="search_entities",
+            description="Find existing NPCs, locations, quests, items, or factions by description.",
+            args_schema=_EntitySearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_open_threads,
+            name="search_open_threads",
+            description="Find open unresolved plot threads by topic. REQUIRED before adding thread IDs to threads_closed.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_resolved_threads,
+            name="search_resolved_threads",
+            description="Verify whether a thread was already resolved. REQUIRED before opening new threads.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_events,
+            name="search_events",
+            description="Find past story events for context or deduplication.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_past_notes,
+            name="search_past_notes",
+            description="Find broader historical session context from past notes.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_decisions,
+            name="search_decisions",
+            description="Find past party decisions.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_loot,
+            name="search_loot",
+            description="Find previously acquired loot or items.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=search_combat,
+            name="search_combat",
+            description="Find past combat encounters.",
+            args_schema=_SearchInput,
+        ),
+    ]
 
 
 # ── Output schema ──────────────────────────────────────────────────────────────
@@ -99,22 +514,7 @@ class NoteOutput(BaseModel):
     )
 
 
-# ── Agent singleton ──────────────────────────────────────────────────────────────
-
-_MODEL_STR = f"{os.environ.get('MODEL_PROVIDER', 'openai')}:{os.environ.get('MODEL', 'gpt-5.4')}"
-
-
-def _get_agent() -> Any:
-    global _agent
-    if _agent is None:
-        _agent = create_agent(
-            model=_MODEL_STR,
-            tools=[],
-            response_format=NoteOutput,
-            system_prompt=SYSTEM_PROMPT,
-        )
-    return _agent
-
+# ── Config validation ────────────────────────────────────────────────────────
 
 _PROVIDER_KEY_MAP = {
     "openai": "OPENAI_API_KEY",
@@ -122,8 +522,8 @@ _PROVIDER_KEY_MAP = {
 }
 
 
-def init_agent() -> None:
-    """Eagerly initialize the LLM agent. Raises if required API key is missing."""
+def validate_config() -> None:
+    """Validate LLM config at startup. Raises if required API key is missing."""
     provider = os.environ.get("MODEL_PROVIDER", "openai")
     required_key = _PROVIDER_KEY_MAP.get(provider)
     if required_key and not os.environ.get(required_key):
@@ -134,20 +534,20 @@ def init_agent() -> None:
         raise RuntimeError(
             f"MODEL_PROVIDER is '{provider}' but {required_key} is not set"
         )
-    _get_agent()
-    logger.info("LLM agent initialised (model=%s)", _MODEL_STR)
+    logger.info("LLM config validated (model=%s)", _MODEL_STR)
 
 
 # ── Prompt builder ─────────────────────────────────────────────────────────────
 
+def _filter_important_quotes(quotes: list) -> list:
+    """Post-filter for important quotes (placeholder — returns quotes unchanged)."""
+    return quotes
+
+
 def _build_user_prompt(
     transcripts: list,
-    entities: list,
     recent_notes: list,
-    open_threads: list,
-    resolved_threads: list,
     *,
-    game_events: list,
     player_characters: list,
 ) -> str:
     lines = ["## Transcripts (format: [ID:N][SPEAKER]: text — use N as transcript_id, SPEAKER as speaker)"]
@@ -156,38 +556,10 @@ def _build_user_prompt(
 
     lines.append("\n## Recent Notes")
     if recent_notes:
-        for n in recent_notes[-3:]:
+        for n in recent_notes:
             lines.append(f"### Note from {n.created_at}\n{n.summary}")
     else:
         lines.append("None yet.")
-
-    lines.append("\n## Open Threads")
-    if open_threads:
-        for thread in open_threads:
-            lines.append(f"- ID {thread.id}: {thread.text}")
-    else:
-        lines.append("None.")
-
-    lines.append("\n## Resolved Threads (do NOT re-open these)")
-    if resolved_threads:
-        for thread in resolved_threads:
-            lines.append(f"- ID {thread.id}: {thread.text} (resolved: {thread.resolution or 'no details'})")
-    else:
-        lines.append("None.")
-
-    lines.append("\n## Known Entities")
-    if entities:
-        for e in entities:
-            lines.append(f"- [{e.entity_type}] {e.name}: {e.description}")
-    else:
-        lines.append("None yet.")
-
-    lines.append("\n## Previous Events")
-    if game_events:
-        for ev in game_events:
-            lines.append(f"- {ev.text}")
-    else:
-        lines.append("None recorded yet.")
 
     lines.append("\n## Player Characters")
     if player_characters:
@@ -202,28 +574,42 @@ def _build_user_prompt(
 # ── Exported function ──────────────────────────────────────────────────────────
 
 async def generate_note(
+    game_id: int,
     transcripts: list,
-    entities: list,
     recent_notes: list,
-    open_threads: list,
-    resolved_threads: list,
     *,
-    game_events: list,
     player_characters: list,
 ) -> NoteOutput:
-    """Call the agent and return a structured NoteOutput."""
-    prompt = _build_user_prompt(
-        transcripts, entities, recent_notes, open_threads, resolved_threads,
-        game_events=game_events, player_characters=player_characters,
+    """Create a per-call agent with game-scoped search tools and return a NoteOutput."""
+    tools = make_game_tools(game_id)
+    agent = create_agent(
+        model=_MODEL_STR,
+        tools=tools,
+        response_format=NoteOutput,
+        debug=os.getenv("LOG_LEVEL", "").lower() == "debug" or os.getenv("AGENT_DEBUG", "false").lower() == "true",
     )
+    prompt = _build_user_prompt(transcripts, recent_notes, player_characters=player_characters)
     logger.info(
-        "Calling LLM: transcripts=%d prompt_chars=%d model=%s",
-        len(transcripts), len(prompt), _MODEL_STR,
+        "Calling LLM: game_id=%d transcripts=%d prompt_chars=%d model=%s",
+        game_id, len(transcripts), len(prompt), _MODEL_STR,
     )
-    agent = _get_agent()
-    result = await agent.ainvoke({
-        "messages": [{"role": "user", "content": prompt}]
-    })
+    try:
+        result = await agent.ainvoke(
+            {
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"{prompt}\n\n{_STRUCTURED_OUTPUT_PROMPT}"},
+                ]
+            },
+            config={"recursion_limit": 25},
+        )
+    except GraphRecursionError:
+        logger.warning(
+            "Agent recursion limit hit for game_id=%d; transcripts will be retried on next poll",
+            game_id,
+        )
+        raise  # handled by _run_pipeline in note_taker.py — transcripts not marked processed
+
     # Post-filter: remove any entity whose name matches a known player character
     pc_names = {pc.character_name.lower() for pc in player_characters}
     note_output = result["structured_response"]

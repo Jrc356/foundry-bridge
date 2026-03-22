@@ -25,9 +25,17 @@ RUN npm run build
 FROM base AS bridge
 # Install dependencies only (cached layer — invalidated only when pyproject.toml/uv.lock changes)
 RUN uv sync --frozen --no-install-project --python /usr/local/bin/python3.11
+
+# Pre-download the FastEmbed model into the image (~270 MB, cached as a distinct layer)
+# Do this before copying source code so changes to Python files don't invalidate this cache
+ENV FASTEMBED_CACHE_PATH=/app/.cache/fastembed
+RUN /app/.venv/bin/python -c \
+    "from fastembed import TextEmbedding; TextEmbedding(model_name='nomic-ai/nomic-embed-text-v1.5')"
+
 COPY . /app
 # Install the project itself now that source is present
 RUN uv sync --frozen --python /usr/local/bin/python3.11
+
 # Copy in the built React app
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 EXPOSE 8765 8767
