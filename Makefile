@@ -1,4 +1,4 @@
-.PHONY: sync sync-transcriber run run-transcriber build up up-bridge down
+.PHONY: sync sync-transcriber run run-transcriber run-api run-frontend build up up-bridge down
 
 # ── Local dev ────────────────────────────────────────────────────────────────
 
@@ -13,6 +13,12 @@ run:
 
 run-transcriber:
 	uv run foundry-bridge-transcriber
+
+run-api:
+	uv run uvicorn foundry_bridge.api:app --reload --port 8767
+
+run-frontend:
+	cd frontend && npm run dev
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 

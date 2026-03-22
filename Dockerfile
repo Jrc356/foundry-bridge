@@ -13,6 +13,14 @@ COPY pyproject.toml uv.lock /app/
 ENV UV_NO_DEV=1
 ENV UV_PYTHON_DOWNLOADS=never
 
+# ── Frontend build ─────────────────────────────────────────────────────────────
+FROM node:20-alpine AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --silent
+COPY frontend/ ./
+RUN npm run build
+
 # ── Bridge ────────────────────────────────────────────────────────────────────
 FROM base AS bridge
 # Install dependencies only (cached layer — invalidated only when pyproject.toml/uv.lock changes)
@@ -20,7 +28,9 @@ RUN uv sync --frozen --no-install-project --python /usr/local/bin/python3.11
 COPY . /app
 # Install the project itself now that source is present
 RUN uv sync --frozen --python /usr/local/bin/python3.11
-EXPOSE 8765
+# Copy in the built React app
+COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
+EXPOSE 8765 8767
 CMD ["/app/.venv/bin/foundry-bridge"]
 
 # ── Migrate ───────────────────────────────────────────────────────────────────

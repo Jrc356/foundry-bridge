@@ -3,6 +3,7 @@ import os
 from typing import Any, Optional
 
 from langchain.agents import create_agent
+from pydantic import BaseModel, Field
 
 from foundry_bridge.models import EntityType
 

@@ -7,9 +7,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import uvicorn
 from websockets.asyncio.server import ServerConnection, serve
 
 from foundry_bridge import note_taker, transcriber
+from foundry_bridge.api import app as fastapi_app
 from foundry_bridge.db import get_or_create_game
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 HOST = "0.0.0.0"
 WS_PORT = int(__import__("os").environ.get("WS_PORT", "8765"))
 HTTP_PORT = int(__import__("os").environ.get("HTTP_PORT", "8766"))
+API_PORT = int(__import__("os").environ.get("API_PORT", "8767"))
 
 # Connection timeout: close if no messages received in 30 seconds
 CONNECTION_TIMEOUT_SECS = 30
@@ -252,6 +255,12 @@ async def _main() -> None:
     health_server = await asyncio.start_server(_handle_health, HOST, HTTP_PORT)
     logger.info("health check server started on http://%s:%s/health", HOST, HTTP_PORT)
 
+    # Start FastAPI REST + SPA server
+    api_config = uvicorn.Config(fastapi_app, host=HOST, port=API_PORT, log_level="warning")
+    api_server = uvicorn.Server(api_config)
+    api_task = asyncio.create_task(api_server.serve())
+    logger.info("API server started on http://%s:%s", HOST, API_PORT)
+
     await transcriber.init()
     note_taker.start_background_tasks()
 
@@ -263,6 +272,7 @@ async def _main() -> None:
             _ws_server.close()
             await _ws_server.wait_closed()
             logger.info("WebSocket server closed")
+        api_server.should_exit = True
         await note_taker.stop_background_tasks()
         await transcriber.shutdown()
 
@@ -285,6 +295,11 @@ async def _main() -> None:
             await timeout_monitor_task
         except asyncio.CancelledError:
             logger.debug("Timeout monitor stopped")
+        api_task.cancel()
+        try:
+            await api_task
+        except asyncio.CancelledError:
+            logger.debug("API server stopped")
 
     logger.info("server stopped")
 
