@@ -51,6 +51,22 @@ REQUIRED tool-use rules:
 - Avoid calling the same tool with identical queries twice. Use prior tool results
   instead of re-searching.
 
+Above-table / out-of-character (OOC) content:
+- Transcripts may contain real-world chatter between players that has nothing to do
+  with the game. Use your judgment to identify and completely ignore this content.
+- Examples of OOC content to ignore:
+  - Food and drink orders ("Can we order pizza?", "I need a coffee break")
+  - Scheduling or logistics ("Are we playing next week?", "I have to leave by 10")
+  - Real-world side conversations unrelated to the game
+  - Technical issues ("My mic is cutting out", "Can you hear me?")
+  - Rules clarifications or debates that don't affect the in-game story
+  - Casual banter, jokes, or commentary that is clearly between players as people,
+    not between characters
+- None of the above should appear in any output field — not in the summary, events,
+  decisions, loot, entities, threads, quests, or important quotes.
+- Important quotes must be strictly in-character dialogue spoken within the fiction
+  of the game. Never quote a player speaking as themselves.
+
 Guidelines:
 - Write the summary in past tense, 3–6 sentences.
 - Decisions are any agreements, plans, or choices the party made — "made_by" may be
