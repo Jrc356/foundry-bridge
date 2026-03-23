@@ -73,6 +73,14 @@ export interface Quest {
   updated_at: string;
 }
 
+export interface QuestDescriptionHistory {
+  id: number;
+  quest_id: number;
+  description: string;
+  note_id: number | null;
+  created_at: string;
+}
+
 export interface Decision {
   id: number;
   game_id: number;

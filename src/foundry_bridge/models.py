@@ -217,6 +217,24 @@ class Quest(Base):
     )
 
 
+class QuestDescriptionHistory(Base):
+    """Archived snapshot of a quest description before it was overwritten."""
+
+    __tablename__ = "quest_description_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    quest_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("quests.id", ondelete="CASCADE"), nullable=False
+    )
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    # Informational reference — intentionally no FK so note deletion doesn't
+    # cascade to history rows.
+    note_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 # ── Association tables (join tables for many-to-many) ───────────────────────
 
 notes_events_table = sa.Table(

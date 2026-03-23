@@ -38,6 +38,7 @@ from foundry_bridge.models import (
     Note,
     PlayerCharacter,
     Quest,
+    QuestDescriptionHistory,
     Thread,
     Transcript,
 )
@@ -194,6 +195,17 @@ class QuestOut(BaseModel):
     note_ids: list[int]
     created_at: datetime
     updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class QuestDescriptionHistoryOut(BaseModel):
+    id: int
+    quest_id: int
+    description: str
+    note_id: Optional[int]
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -572,6 +584,19 @@ async def delete_quest(quest_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Quest not found")
     await db.delete(quest)
     await db.commit()
+
+
+@app.get("/api/quests/{quest_id}/history", response_model=list[QuestDescriptionHistoryOut])
+async def get_quest_description_history(quest_id: int, db: AsyncSession = Depends(get_db)):
+    quest = await db.get(Quest, quest_id)
+    if not quest:
+        raise HTTPException(status_code=404, detail="Quest not found")
+    result = await db.execute(
+        sa.select(QuestDescriptionHistory)
+        .where(QuestDescriptionHistory.quest_id == quest_id)
+        .order_by(QuestDescriptionHistory.created_at.desc())
+    )
+    return result.scalars().all()
 
 
 # ── Decisions ─────────────────────────────────────────────────────────────────

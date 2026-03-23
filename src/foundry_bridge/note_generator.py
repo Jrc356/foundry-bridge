@@ -99,6 +99,9 @@ Guidelines:
 - Quests: use quests_opened for NEW quests discovered this session (after checking
   search_quests). Use quests_completed (quest names only) for quests clearly wrapped up.
   Use quests_updated for quests with new information but not yet finished.
+  The description should reflect the current known state of the quest as of this session.
+  The previous description is archived automatically — do NOT repeat or copy it; write a
+  concise description based on what the party now knows about the quest.
   For quest_giver_entity_id, use search_entities to look up the NPC and pass their ID.
 """
 
@@ -579,6 +582,9 @@ class QuestOutput(BaseModel):
 
 class QuestUpdateOutput(BaseModel):
     name: str  # used to look up the existing quest
+    # Concise description of the quest's current known state as of this session.
+    # The old description is archived automatically — do NOT copy or repeat it;
+    # write fresh based on what the party now knows.
     description: Optional[str] = None
     status: Optional[Literal["active", "completed"]] = None
     quest_giver_entity_id: Optional[int] = None

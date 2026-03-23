@@ -23,6 +23,7 @@ from foundry_bridge.models import (
     Note,
     PlayerCharacter,
     Quest,
+    QuestDescriptionHistory,
     Thread,
     Transcript,
     notes_events_table,
@@ -309,26 +310,48 @@ async def write_note_pipeline_result(
 
             # 3. Upsert quests from quests_opened (new active quests)
             for q in quests_opened:
-                quest_stmt = pg_insert(Quest).values(
-                    game_id=game_id,
-                    name=q["name"],
-                    description=q["description"],
-                    status="active",
-                    quest_giver_entity_id=q.get("quest_giver_entity_id"),
-                    note_ids=[note_id],
+                # Check whether the quest already exists so we can archive its
+                # current description before overwriting it.
+                existing_result = await session.execute(
+                    sa.select(Quest.id, Quest.description).where(
+                        Quest.game_id == game_id, Quest.name == q["name"]
+                    )
                 )
-                quest_stmt = quest_stmt.on_conflict_do_update(
-                    constraint="uq_quests_game_name",
-                    set_={
-                        "description": quest_stmt.excluded.description,
-                        "note_ids": sa.func.array_append(Quest.note_ids, note_id),
-                        "updated_at": sa.func.now(),
-                    },
-                ).returning(Quest.id)
-                quest_result = await session.execute(quest_stmt)
-                quest_id_val = quest_result.scalar()
-                if quest_id_val is not None:
-                    inserted_quest_ids.append(quest_id_val)
+                existing_row = existing_result.one_or_none()
+
+                if existing_row is not None:
+                    existing_quest_id, old_description = existing_row
+                    # Archive old description before overwriting
+                    session.add(
+                        QuestDescriptionHistory(
+                            quest_id=existing_quest_id,
+                            description=old_description,
+                            note_id=note_id,
+                        )
+                    )
+                    await session.execute(
+                        sa.update(Quest)
+                        .where(Quest.id == existing_quest_id)
+                        .values(
+                            description=q["description"],
+                            note_ids=sa.func.array_append(Quest.note_ids, note_id),
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                    inserted_quest_ids.append(existing_quest_id)
+                else:
+                    quest_stmt = pg_insert(Quest).values(
+                        game_id=game_id,
+                        name=q["name"],
+                        description=q["description"],
+                        status="active",
+                        quest_giver_entity_id=q.get("quest_giver_entity_id"),
+                        note_ids=[note_id],
+                    ).returning(Quest.id)
+                    quest_result = await session.execute(quest_stmt)
+                    quest_id_val = quest_result.scalar()
+                    if quest_id_val is not None:
+                        inserted_quest_ids.append(quest_id_val)
 
             # 4. Mark quests as completed
             for quest_name in quests_completed:
@@ -349,6 +372,22 @@ async def write_note_pipeline_result(
                     "updated_at": sa.func.now(),
                 }
                 if qu.get("description") is not None:
+                    # Archive old description before overwriting
+                    prev_result = await session.execute(
+                        sa.select(Quest.id, Quest.description).where(
+                            Quest.game_id == game_id, Quest.name == qu["name"]
+                        )
+                    )
+                    prev_row = prev_result.one_or_none()
+                    if prev_row is not None:
+                        prev_quest_id, old_description = prev_row
+                        session.add(
+                            QuestDescriptionHistory(
+                                quest_id=prev_quest_id,
+                                description=old_description,
+                                note_id=note_id,
+                            )
+                        )
                     upd["description"] = qu["description"]
                 if qu.get("status") is not None:
                     upd["status"] = qu["status"]

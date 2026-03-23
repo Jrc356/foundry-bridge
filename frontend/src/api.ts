@@ -10,6 +10,7 @@ import type {
   Note,
   PlayerCharacter,
   Quest,
+  QuestDescriptionHistory,
   SearchResults,
   Thread,
   Transcript,
@@ -73,6 +74,8 @@ export const createQuest = (gameId: number, data: Pick<Quest, 'name' | 'descript
 export const updateQuest = (id: number, data: Partial<Pick<Quest, 'name' | 'description' | 'status' | 'quest_giver_entity_id'>>) =>
   api.patch<Quest>(`/quests/${id}`, data).then(r => r.data);
 export const deleteQuest = (id: number) => api.delete(`/quests/${id}`);
+export const getQuestHistory = (questId: number) =>
+  api.get<QuestDescriptionHistory[]>(`/quests/${questId}/history`).then(r => r.data);
 
 // ── Decisions ──────────────────────────────────────────────────────────────
 export const getDecisions = (gameId: number) =>

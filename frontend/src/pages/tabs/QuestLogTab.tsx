@@ -1,22 +1,45 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle, ChevronDown, ChevronUp, PlusCircle, Trash2, User } from 'lucide-react'
+import { CheckCircle, ChevronDown, ChevronUp, History, PlusCircle, Trash2, User } from 'lucide-react'
 import { useState } from 'react'
 import {
   createQuest,
   deleteQuest,
   getEntities,
   getLoot,
+  getQuestHistory,
   getQuests,
   getThreads,
   updateQuest,
   updateThread,
 } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
-import type { Entity, Loot, Quest, Thread } from '../../types'
+import type { Entity, Loot, Quest, QuestDescriptionHistory, Thread } from '../../types'
 
 const STATUS_BADGE: Record<Quest['status'], string> = {
   active: 'bg-amber-900 text-amber-200 border border-amber-700',
   completed: 'bg-emerald-900 text-emerald-200 border border-emerald-700',
+}
+
+function QuestHistorySection({ questId }: { questId: number }) {
+  const { data: history = [], isLoading } = useQuery<QuestDescriptionHistory[]>({
+    queryKey: ['quest-history', questId],
+    queryFn: () => getQuestHistory(questId),
+  })
+  if (isLoading) return <p className="text-xs text-gray-500">Loading history…</p>
+  if (history.length === 0)
+    return <p className="text-xs text-gray-600">No previous descriptions recorded.</p>
+  return (
+    <ol className="grid gap-2">
+      {history.map(h => (
+        <li key={h.id} className="grid gap-1 bg-gray-900 rounded-lg px-3 py-2">
+          <time className="text-xs text-gray-500">
+            {new Date(h.created_at).toLocaleString()}
+          </time>
+          <p className="text-xs text-gray-400">{h.description}</p>
+        </li>
+      ))}
+    </ol>
+  )
 }
 
 export default function QuestLogTab({ gameId }: { gameId: number }) {
@@ -26,6 +49,7 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
   const [editing, setEditing] = useState<number | null>(null)
   const [editValues, setEditValues] = useState<Partial<Quest>>({})
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [historyOpen, setHistoryOpen] = useState<Set<number>>(new Set())
   const qc = useQueryClient()
 
   const status = filter === 'all' ? undefined : filter
@@ -86,6 +110,13 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
 
   const toggleExpand = (id: number) =>
     setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+
+  const toggleHistory = (id: number) =>
+    setHistoryOpen(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
@@ -282,9 +313,22 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                       )}
                     </div>
 
-                    {/* Expanded: threads and thread linking */}
+                    {/* Expanded: description history, threads, and loot */}
                     {isExpanded && (
                       <div className="border-t border-gray-700 px-4 py-3 grid gap-3">
+                        {/* Description history */}
+                        <div>
+                          <button
+                            onClick={() => toggleHistory(quest.id)}
+                            className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 hover:text-gray-300 transition-colors w-full text-left"
+                          >
+                            <History size={11} />
+                            Description History
+                            {historyOpen.has(quest.id) ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                          </button>
+                          {historyOpen.has(quest.id) && <QuestHistorySection questId={quest.id} />}
+                        </div>
+                        {/* Linked threads */}
                         <div>
                           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
                             Linked Threads ({linkedThreads.length})
