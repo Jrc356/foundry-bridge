@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, Dices, Search, Shield, Sparkles, Swords, Trophy, Zap } from 'lucide-react'
+import { BookOpen, Dices, MapPin, Search, Shield, Sparkles, Swords, Trophy, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { searchGame } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
@@ -10,6 +10,7 @@ import type {
   Event,
   Loot,
   Note,
+  Quest,
   Thread,
 } from '../../types'
 
@@ -22,12 +23,12 @@ const TYPE_OPTIONS = [
   { value: 'decisions', label: 'Decisions', icon: Dices },
   { value: 'loot', label: 'Loot', icon: Trophy },
   { value: 'combat', label: 'Combat', icon: Swords },
+  { value: 'quests', label: 'Quests', icon: MapPin },
 ] as const
 
 const ENTITY_TYPE_COLORS: Record<string, string> = {
   npc: 'bg-purple-900 text-purple-200',
   location: 'bg-emerald-900 text-emerald-200',
-  quest: 'bg-amber-900 text-amber-200',
   item: 'bg-blue-900 text-blue-200',
   faction: 'bg-red-900 text-red-200',
   other: 'bg-gray-700 text-gray-300',
@@ -52,7 +53,8 @@ export default function SearchTab({ gameId }: { gameId: number }) {
       data.events.length +
       data.decisions.length +
       data.loot.length +
-      data.combat.length
+      data.combat.length +
+      (data.quests?.length ?? 0)
     : 0
 
   function handleSubmit(e: React.FormEvent) {
@@ -213,6 +215,27 @@ export default function SearchTab({ gameId }: { gameId: number }) {
                   <p className="text-sm font-medium text-gray-100">{c.encounter}</p>
                   <p className="text-sm text-gray-400 mt-1">{c.outcome}</p>
                   <p className="text-xs text-gray-500 mt-1">{new Date(c.created_at).toLocaleDateString()}</p>
+                </div>
+              ))}
+            </Section>
+          )}
+
+          {/* Quests */}
+          {(data.quests?.length ?? 0) > 0 && (
+            <Section title="Quests" icon={<MapPin size={14} />} count={data.quests.length}>
+              {data.quests.map((q: Quest) => (
+                <div key={q.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                      q.status === 'active'
+                        ? 'bg-amber-900 text-amber-200 border-amber-700'
+                        : 'bg-emerald-900 text-emerald-200 border-emerald-700'
+                    }`}>
+                      {q.status}
+                    </span>
+                    <span className="text-sm font-semibold text-gray-100">{q.name}</span>
+                  </div>
+                  <p className="text-sm text-gray-400">{q.description}</p>
                 </div>
               ))}
             </Section>

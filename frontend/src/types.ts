@@ -97,6 +97,7 @@ export interface SearchResults {
   decisions: Decision[];
   loot: Loot[];
   combat: CombatUpdate[];
+  quests: Quest[];
 }
 
 export interface CombatUpdate {

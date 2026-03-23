@@ -24,6 +24,7 @@ from foundry_bridge.db import (
     search_loot,
     search_notes,
     search_open_threads,
+    search_quests,
     search_resolved_threads,
 )
 from foundry_bridge.models import (
@@ -690,7 +691,7 @@ async def list_player_characters(game_id: int, db: AsyncSession = Depends(get_db
 
 # ── Semantic search ──────────────────────────────────────────────────────────
 
-_SEARCHABLE_TYPES = frozenset({"entities", "notes", "threads", "events", "decisions", "loot", "combat"})
+_SEARCHABLE_TYPES = frozenset({"entities", "notes", "threads", "events", "decisions", "loot", "combat", "quests"})
 
 
 class SearchResultsOut(BaseModel):
@@ -701,6 +702,7 @@ class SearchResultsOut(BaseModel):
     decisions: list[DecisionOut] = []
     loot: list[LootOut] = []
     combat: list[CombatUpdateOut] = []
+    quests: list[QuestOut] = []
 
 
 @app.get("/api/games/{game_id}/search", response_model=SearchResultsOut)
@@ -766,8 +768,13 @@ async def search_game(
             return await search_combat(game_id, q, k=limit)
         return []
 
-    entities, notes, threads, events, decisions, loot, combat = await asyncio.gather(
-        _entities(), _notes(), _threads(), _events(), _decisions(), _loot(), _combat()
+    async def _quests():
+        if run_all or content_type == "quests":
+            return await search_quests(game_id, q, k=limit)
+        return []
+
+    entities, notes, threads, events, decisions, loot, combat, quests = await asyncio.gather(
+        _entities(), _notes(), _threads(), _events(), _decisions(), _loot(), _combat(), _quests()
     )
 
     return SearchResultsOut(
@@ -778,6 +785,7 @@ async def search_game(
         decisions=decisions,
         loot=loot,
         combat=combat,
+        quests=quests,
     )
 
 

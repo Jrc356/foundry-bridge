@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle, Circle, PlusCircle, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { createThread, deleteThread, getThreads, updateThread } from '../../api'
+import { createThread, deleteThread, getQuests, getThreads, updateThread } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
-import type { Thread } from '../../types'
+import type { Quest, Thread } from '../../types'
 
 export default function ThreadsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
@@ -12,12 +12,19 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
   const [newText, setNewText] = useState('')
   const [resolving, setResolving] = useState<number | null>(null)
   const [resolution, setResolution] = useState('')
+  const [linkingQuestFor, setLinkingQuestFor] = useState<number | null>(null)
 
   const resolved = filter === 'resolved' ? true : filter === 'open' ? false : undefined
   const { data: threads = [], isLoading } = useQuery({
     queryKey: ['threads', gameId, resolved],
     queryFn: () => getThreads(gameId, resolved),
   })
+
+  const { data: quests = [] } = useQuery({
+    queryKey: ['quests', gameId],
+    queryFn: () => getQuests(gameId),
+  })
+  const questMap = new Map((quests as Quest[]).map(q => [q.id, q]))
 
   const createMut = useMutation({
     mutationFn: () => createThread(gameId, newText),
@@ -27,6 +34,17 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
   const resolveMut = useMutation({
     mutationFn: (id: number) => updateThread(id, { is_resolved: true, resolution }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['threads', gameId] }); setResolving(null); setResolution('') },
+  })
+
+  const unlinkQuestMut = useMutation({
+    mutationFn: (id: number) => updateThread(id, { quest_id: null }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['threads', gameId] }),
+  })
+
+  const linkQuestMut = useMutation({
+    mutationFn: ({ id, quest_id }: { id: number; quest_id: number | null }) =>
+      updateThread(id, { quest_id }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['threads', gameId] }); setLinkingQuestFor(null) },
   })
 
   const deleteMut = useMutation({
@@ -108,13 +126,48 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
                       {thread.is_resolved && thread.resolution && (
                         <p className="text-xs text-green-600 mt-1 italic">Resolved: {thread.resolution}</p>
                       )}
+                      {thread.quest_id != null && (
+                        <span className="inline-flex items-center gap-1 mt-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-900 text-amber-200 border border-amber-700">
+                          ↗ {questMap.get(thread.quest_id)?.name ?? `Quest #${thread.quest_id}`}
+                          <button
+                            onClick={() => unlinkQuestMut.mutate(thread.id)}
+                            className="ml-0.5 text-amber-400 hover:text-amber-100 leading-none"
+                            title="Unlink quest"
+                          >×</button>
+                        </span>
+                      )}
+                      {linkingQuestFor === thread.id ? (
+                        <div className="mt-2 flex items-center gap-2">
+                          <select
+                            autoFocus
+                            className="bg-gray-900 border border-gray-600 rounded-lg px-2 py-1 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            defaultValue={thread.quest_id ?? ''}
+                            onChange={e => {
+                              const val = e.target.value
+                              linkQuestMut.mutate({ id: thread.id, quest_id: val ? Number(val) : null })
+                            }}
+                          >
+                            <option value="">— none —</option>
+                            {(quests as Quest[]).map(q => (
+                              <option key={q.id} value={q.id}>{q.name} ({q.status})</option>
+                            ))}
+                          </select>
+                          <button onClick={() => setLinkingQuestFor(null)} className="text-xs text-gray-500 hover:text-gray-300">Cancel</button>
+                        </div>
+                      ) : null}
                       <p className="text-xs text-gray-600 mt-1">{new Date(thread.created_at).toLocaleDateString()}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {!thread.is_resolved && (
-                      <button onClick={() => setResolving(thread.id)}
-                        className="text-xs text-green-600 hover:text-green-400 font-medium transition-colors">Resolve</button>
+                      <>
+                        <button onClick={() => setLinkingQuestFor(v => v === thread.id ? null : thread.id)}
+                          className="text-xs text-amber-600 hover:text-amber-400 font-medium transition-colors">
+                          Link Quest ▾
+                        </button>
+                        <button onClick={() => setResolving(thread.id)}
+                          className="text-xs text-green-600 hover:text-green-400 font-medium transition-colors">Resolve</button>
+                      </>
                     )}
                     <button onClick={() => confirm('Delete thread?') && deleteMut.mutate(thread.id)}
                       className="text-gray-600 hover:text-red-400 transition-colors"><Trash2 size={14} /></button>

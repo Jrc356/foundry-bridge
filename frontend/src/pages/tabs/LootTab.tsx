@@ -1,19 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PlusCircle, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { createLoot, deleteLoot, getLoot } from '../../api'
+import { createLoot, deleteLoot, getLoot, getQuests, updateLoot } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
-import type { Loot } from '../../types'
+import type { Loot, Quest } from '../../types'
 
 export default function LootTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: loot = [], isLoading } = useQuery({ queryKey: ['loot', gameId], queryFn: () => getLoot(gameId) })
+  const { data: quests = [] } = useQuery({ queryKey: ['quests', gameId], queryFn: () => getQuests(gameId) })
+  const questMap = new Map((quests as Quest[]).map(q => [q.id, q]))
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ item_name: '', acquired_by: '' })
+  const [linkingQuestFor, setLinkingQuestFor] = useState<number | null>(null)
 
   const createMut = useMutation({
     mutationFn: () => createLoot(gameId, form),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['loot', gameId] }); setShowAdd(false); setForm({ item_name: '', acquired_by: '' }) },
+  })
+
+  const linkQuestMut = useMutation({
+    mutationFn: ({ id, quest_id }: { id: number; quest_id: number | null }) =>
+      updateLoot(id, { quest_id }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['loot', gameId] }); setLinkingQuestFor(null) },
   })
 
   const deleteMut = useMutation({
@@ -65,6 +74,7 @@ export default function LootTab({ gameId }: { gameId: number }) {
               <tr className="bg-gray-800 text-left text-xs text-gray-400 uppercase tracking-wider">
                 <th className="px-4 py-3">Item</th>
                 <th className="px-4 py-3">Acquired By</th>
+                <th className="px-4 py-3">Quest</th>
                 <th className="px-4 py-3">Date</th>
                 <th className="px-4 py-3 w-8"></th>
               </tr>
@@ -74,6 +84,39 @@ export default function LootTab({ gameId }: { gameId: number }) {
                 <tr key={item.id} className="hover:bg-gray-800/50">
                   <td className="px-4 py-3 text-amber-300 font-medium">{item.item_name}</td>
                   <td className="px-4 py-3 text-gray-300">{item.acquired_by}</td>
+                  <td className="px-4 py-3">
+                    {linkingQuestFor === item.id ? (
+                      <div className="flex items-center gap-2">
+                        <select
+                          autoFocus
+                          className="bg-gray-900 border border-gray-600 rounded-lg px-2 py-1 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                          defaultValue={item.quest_id ?? ''}
+                          onChange={e => {
+                            const val = e.target.value
+                            linkQuestMut.mutate({ id: item.id, quest_id: val ? Number(val) : null })
+                          }}
+                        >
+                          <option value="">— none —</option>
+                          {(quests as Quest[]).map(q => (
+                            <option key={q.id} value={q.id}>{q.name} ({q.status})</option>
+                          ))}
+                        </select>
+                        <button onClick={() => setLinkingQuestFor(null)} className="text-xs text-gray-500 hover:text-gray-300">✕</button>
+                      </div>
+                    ) : item.quest_id != null ? (
+                      <button
+                        onClick={() => setLinkingQuestFor(item.id)}
+                        className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-full bg-amber-900 text-amber-200 border border-amber-700 hover:bg-amber-800 transition-colors"
+                      >
+                        ↗ {questMap.get(item.quest_id)?.name ?? `Quest #${item.quest_id}`}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setLinkingQuestFor(item.id)}
+                        className="text-gray-600 hover:text-gray-400 text-xs transition-colors"
+                      >—</button>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">{new Date(item.created_at).toLocaleDateString()}</td>
                   <td className="px-4 py-3">
                     <button onClick={() => confirm('Remove loot?') && deleteMut.mutate(item.id)}
