@@ -361,6 +361,40 @@ async def delete_note(note_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
 
+@app.get("/api/games/{game_id}/notes/{note_id}/events", response_model=list[EventOut])
+async def list_note_events(game_id: int, note_id: int, db: AsyncSession = Depends(get_db)):
+    """Get all events linked to a specific note (many-to-many via notes_events table)."""
+    from foundry_bridge.models import notes_events_table
+    
+    result = await db.execute(
+        sa.select(Event)
+        .join(notes_events_table, Event.id == notes_events_table.c.event_id)
+        .where(
+            notes_events_table.c.note_id == note_id,
+            Event.game_id == game_id,
+        )
+        .order_by(Event.created_at.asc())
+    )
+    return result.scalars().all()
+
+
+@app.get("/api/games/{game_id}/notes/{note_id}/loot", response_model=list[LootOut])
+async def list_note_loot(game_id: int, note_id: int, db: AsyncSession = Depends(get_db)):
+    """Get all loot linked to a specific note (many-to-many via notes_loot table)."""
+    from foundry_bridge.models import notes_loot_table
+    
+    result = await db.execute(
+        sa.select(Loot)
+        .join(notes_loot_table, Loot.id == notes_loot_table.c.loot_id)
+        .where(
+            notes_loot_table.c.note_id == note_id,
+            Loot.game_id == game_id,
+        )
+        .order_by(Loot.created_at.asc())
+    )
+    return result.scalars().all()
+
+
 # ── Entities ──────────────────────────────────────────────────────────────────
 
 

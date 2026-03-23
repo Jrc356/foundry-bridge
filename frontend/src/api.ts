@@ -101,6 +101,20 @@ export const getQuotes = (gameId: number) =>
   api.get<ImportantQuote[]>(`/games/${gameId}/quotes`).then(r => r.data);
 export const deleteQuote = (id: number) => api.delete(`/quotes/${id}`);
 
+// ── Note-specific linked data ──────────────────────────────────────────────
+export const getNoteEvents = (gameId: number, noteId: number) =>
+  api.get<Event[]>(`/games/${gameId}/notes/${noteId}/events`).then(r => r.data);
+export const getNoteLoot = (gameId: number, noteId: number) =>
+  api.get<Loot[]>(`/games/${gameId}/notes/${noteId}/loot`).then(r => r.data);
+export const getNoteThreads = (gameId: number, noteId: number) =>
+  api.get<Thread[]>(`/games/${gameId}/threads`).then(r => 
+    r.data.filter(t => t.resolved_by_note_id === noteId)
+  );
+export const getNoteQuests = (gameId: number, noteId: number) =>
+  api.get<Quest[]>(`/games/${gameId}/quests`).then(r => 
+    r.data.filter(q => q.note_ids.includes(noteId))
+  );
+
 // ── Player characters ──────────────────────────────────────────────────────
 export const getPlayerCharacters = (gameId: number) =>
   api.get<PlayerCharacter[]>(`/games/${gameId}/player_characters`).then(r => r.data);
