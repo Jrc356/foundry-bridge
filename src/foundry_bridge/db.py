@@ -308,7 +308,46 @@ async def write_note_pipeline_result(
                 if entity_id is not None:
                     inserted_entity_ids.append(entity_id)
 
-            # 3. Upsert quests from quests_opened (new active quests)
+            # 3. Resolve quest giver entity names to IDs
+            # If a quest references a giver by name (quest_giver_entity_name) but not by ID,
+            # try to find the matching NPC entity and populate the ID.
+            async def resolve_quest_giver(q: dict) -> None:
+                """Resolve quest_giver_entity_name to quest_giver_entity_id if needed."""
+                if (
+                    q.get("quest_giver_entity_id") is None
+                    and q.get("quest_giver_entity_name") is not None
+                ):
+                    giver_name = q["quest_giver_entity_name"]
+                    # Look up the NPC entity by name in the same game
+                    giver_result = await session.execute(
+                        sa.select(Entity.id).where(
+                            Entity.game_id == game_id,
+                            Entity.entity_type == EntityType.npc,
+                            Entity.name == giver_name,
+                        )
+                    )
+                    giver_id = giver_result.scalar()
+                    if giver_id is not None:
+                        q["quest_giver_entity_id"] = giver_id
+                    else:
+                        # Entity with that name doesn't exist; nullify and log
+                        logger.warning(
+                            "Quest '%s' references missing or non-NPC giver entity '%s'; dropping reference",
+                            q.get("name", "unknown"),
+                            giver_name,
+                            extra={"game_id": game_id},
+                        )
+                        q["quest_giver_entity_name"] = None
+
+            # Resolve giver names for all quests_opened
+            for q in quests_opened:
+                await resolve_quest_giver(q)
+
+            # Also resolve for quests_updated
+            for q in quests_updated:
+                await resolve_quest_giver(q)
+
+            # 4. Upsert quests from quests_opened (new active quests)
             for q in quests_opened:
                 # Check whether the quest already exists so we can archive its
                 # current description before overwriting it.
@@ -353,7 +392,7 @@ async def write_note_pipeline_result(
                     if quest_id_val is not None:
                         inserted_quest_ids.append(quest_id_val)
 
-            # 4. Mark quests as completed
+            # 5. Mark quests as completed
             for quest_name in quests_completed:
                 await session.execute(
                     sa.update(Quest)
@@ -365,7 +404,7 @@ async def write_note_pipeline_result(
                     )
                 )
 
-            # 5. Upsert quests_updated (partial updates to existing quests)
+            # 6. Upsert quests_updated (partial updates to existing quests)
             for qu in quests_updated:
                 upd: dict = {
                     "note_ids": sa.func.array_append(Quest.note_ids, note_id),
@@ -399,7 +438,7 @@ async def write_note_pipeline_result(
                     .values(**upd)
                 )
 
-            # 6. Create new threads; collect IDs via flush
+            # 7. Create new threads; collect IDs via flush
             for thread_data in threads_opened:
                 text = thread_data["text"]
                 raw_quest_id = thread_data.get("quest_id")
@@ -422,7 +461,7 @@ async def write_note_pipeline_result(
                 await session.flush()
                 inserted_thread_ids.append(new_thread.id)
 
-            # 7. Resolve threads (three-tier validation: missing / cross-game / already resolved)
+            # 8. Resolve threads (three-tier validation: missing / cross-game / already resolved)
             if threads_closed:
                 closed_ids = [t["id"] for t in threads_closed]
                 resolutions = {t["id"]: t.get("resolution", "") for t in threads_closed}
@@ -465,7 +504,7 @@ async def write_note_pipeline_result(
                         )
                     )
 
-            # 8. Insert decisions; collect IDs via flush
+            # 9. Insert decisions; collect IDs via flush
             for d in decisions:
                 d_obj = Decision(
                     game_id=game_id, note_id=note_id,
@@ -475,7 +514,7 @@ async def write_note_pipeline_result(
                 await session.flush()
                 inserted_decision_ids.append(d_obj.id)
 
-            # 9. Upsert events + m2m link to note; collect IDs
+            # 10. Upsert events + m2m link to note; collect IDs
             for text in events:
                 event_stmt = (
                     pg_insert(Event)
@@ -500,7 +539,7 @@ async def write_note_pipeline_result(
                     .on_conflict_do_nothing()
                 )
 
-            # 7. Upsert loot + m2m link to note; collect IDs
+            # 11. Upsert loot + m2m link to note; collect IDs
             for item in loot:
                 acquired_by = item.get("acquired_by") or "the party"
                 loot_stmt = pg_insert(Loot).values(
@@ -548,7 +587,7 @@ async def write_note_pipeline_result(
                             game_id, item["item_name"], raw_loot_quest_id,
                         )
 
-            # 11. Insert combat_updates; collect IDs via flush
+            # 12. Insert combat_updates; collect IDs via flush
             for c in combat_updates:
                 c_obj = CombatUpdate(
                     game_id=game_id, note_id=note_id,
@@ -558,7 +597,7 @@ async def write_note_pipeline_result(
                 await session.flush()
                 inserted_combat_ids.append(c_obj.id)
 
-            # 12. Insert important_quotes (validate transcript_id against current batch)
+            # 13. Insert important_quotes (validate transcript_id against current batch)
             valid_transcript_ids = set(source_transcript_ids)
             for q in important_quotes:
                 raw_tid = q.get("transcript_id")
@@ -574,7 +613,7 @@ async def write_note_pipeline_result(
                     speaker=q.get("speaker"),
                 ))
 
-            # 13. Mark all source transcripts as processed
+            # 14. Mark all source transcripts as processed
             await session.execute(
                 sa.update(Transcript)
                 .where(Transcript.id.in_(source_transcript_ids))

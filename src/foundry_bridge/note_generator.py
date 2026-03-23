@@ -103,6 +103,8 @@ Guidelines:
   The previous description is archived automatically — do NOT repeat or copy it; write a
   concise description based on what the party now knows about the quest.
   For quest_giver_entity_id, use search_entities to look up the NPC and pass their ID.
+  If search_entities doesn't find the NPC (e.g., it's being created in this same note),
+  set quest_giver_entity_name instead and the system will resolve it to an ID after entity creation.
 """
 
 _MODEL_STR = f"{os.environ.get('MODEL_PROVIDER', 'openai')}:{os.environ.get('MODEL', 'gpt-5.4')}"
@@ -578,6 +580,7 @@ class QuestOutput(BaseModel):
     name: str
     description: str
     quest_giver_entity_id: Optional[int] = None  # entity ID from search_entities
+    quest_giver_entity_name: Optional[str] = None  # NPC name if ID not yet available
 
 
 class QuestUpdateOutput(BaseModel):
@@ -588,6 +591,7 @@ class QuestUpdateOutput(BaseModel):
     description: Optional[str] = None
     status: Optional[Literal["active", "completed"]] = None
     quest_giver_entity_id: Optional[int] = None
+    quest_giver_entity_name: Optional[str] = None  # NPC name if ID not yet available
 
 
 class NoteOutput(BaseModel):
