@@ -211,7 +211,7 @@ function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes,
                   const shouldShowToggle = q.description.length > 150
 
                   return (
-                    <li key={q.id} className="text-sm border border-gray-700 rounded p-2">
+                    <li key={q.id} className="text-sm">
                       <div className="text-gray-200 font-medium">{q.name}</div>
                       <div className="text-gray-400 text-xs mt-1">Status: {q.status}</div>
                       {q.description && (
