@@ -30,8 +30,8 @@ import ThreadsTab from './tabs/ThreadsTab'
 import TranscriptsTab from './tabs/TranscriptsTab'
 
 const TABS = [
-  { id: 'quests', label: 'Quest Log', icon: MapPin },
   { id: 'search', label: 'Search', icon: Search },
+  { id: 'quests', label: 'Quest Log', icon: MapPin },
   { id: 'notes', label: 'Notes', icon: BookOpen },
   { id: 'entities', label: 'Entities', icon: Shield },
   { id: 'threads', label: 'Threads', icon: Sparkles },
