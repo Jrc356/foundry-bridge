@@ -66,6 +66,8 @@ interface NoteCardProps {
 }
 
 function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes, threads, quests, onDelete }: NoteCardProps) {
+  const [expandedQuests, setExpandedQuests] = useState<Set<number>>(new Set())
+
   // Fetch events and loot upfront so badges show immediately
   const { data: events = [] } = useQuery({
     queryKey: ['noteEvents', gameId, note.id],
@@ -202,13 +204,38 @@ function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes,
           {noteQuestList.length > 0 && (
             <section>
               <h4 className="text-xs font-semibold text-orange-400 uppercase tracking-wider mb-2">Quests</h4>
-              <ul className="grid gap-2">
-                {noteQuestList.map(q => (
-                  <li key={q.id} className="text-sm">
-                    <div className="text-gray-200 font-medium">{q.name}</div>
-                    <div className="text-gray-400 text-xs">Status: {q.status}</div>
-                  </li>
-                ))}
+              <ul className="grid gap-3">
+                {noteQuestList.map(q => {
+                  const isExpanded = expandedQuests.has(q.id)
+                  const truncatedDescription = q.description.length > 150 ? q.description.substring(0, 150) + '...' : q.description
+                  const shouldShowToggle = q.description.length > 150
+
+                  return (
+                    <li key={q.id} className="text-sm border border-gray-700 rounded p-2">
+                      <div className="text-gray-200 font-medium">{q.name}</div>
+                      <div className="text-gray-400 text-xs mt-1">Status: {q.status}</div>
+                      {q.description && (
+                        <div className="mt-2">
+                          <p className="text-gray-300 text-xs leading-relaxed">
+                            {isExpanded ? q.description : truncatedDescription}
+                          </p>
+                          {shouldShowToggle && (
+                            <button
+                              onClick={() => {
+                                const newSet = new Set(expandedQuests)
+                                isExpanded ? newSet.delete(q.id) : newSet.add(q.id)
+                                setExpandedQuests(newSet)
+                              }}
+                              className="text-orange-400 hover:text-orange-300 text-xs mt-1 transition-colors"
+                            >
+                              {isExpanded ? 'Show less' : 'Show more'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
               </ul>
             </section>
           )}
