@@ -66,16 +66,14 @@ interface NoteCardProps {
 }
 
 function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes, threads, quests, onDelete }: NoteCardProps) {
-  // Fetch events and loot only when expanded (per-note queries)
+  // Fetch events and loot upfront so badges show immediately
   const { data: events = [] } = useQuery({
     queryKey: ['noteEvents', gameId, note.id],
     queryFn: () => getNoteEvents(gameId, note.id),
-    enabled: expanded,
   })
   const { data: loot = [] } = useQuery({
     queryKey: ['noteLoot', gameId, note.id],
     queryFn: () => getNoteLoot(gameId, note.id),
-    enabled: expanded,
   })
 
   const noteCombat = combat.filter(c => c.note_id === note.id)
@@ -85,7 +83,7 @@ function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes,
   const noteLoot = (loot as Loot[])
   const noteThreads = threads.filter(t => t.resolved_by_note_id === note.id)
   const noteQuestList = quests.filter(q => q.note_ids.includes(note.id))
-  const hasExtras = noteCombat.length > 0 || noteDecisions.length > 0 || noteQuotes.length > 0 || noteThreads.length > 0 || noteQuestList.length > 0
+  const hasExtras = noteCombat.length > 0 || noteDecisions.length > 0 || noteQuotes.length > 0 || noteEvents.length > 0 || noteLoot.length > 0 || noteThreads.length > 0 || noteQuestList.length > 0
 
   // Compute if there *could* be extras (for expansion button) - includes events/loot which we don't know until fetched
   const hasKnownExtras = hasExtras
@@ -94,7 +92,18 @@ function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes,
     <div className="bg-gray-800 rounded-xl border border-gray-700">
       <div className="p-5">
         <div className="flex justify-between items-start gap-4">
-          <p className="text-gray-100 leading-relaxed flex-1">{note.summary}</p>
+          <div className="flex-1">
+            <p className="text-gray-100 leading-relaxed">{note.summary}</p>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {noteDecisions.length > 0 && <Badge label={`Decisions (${noteDecisions.length})`} color="bg-purple-900 text-purple-300" />}
+              {noteCombat.length > 0 && <Badge label={`Combat (${noteCombat.length})`} color="bg-red-900 text-red-300" />}
+              {noteQuotes.length > 0 && <Badge label={`Quotes (${noteQuotes.length})`} color="bg-blue-900 text-blue-300" />}
+              {noteEvents.length > 0 && <Badge label={`Events (${noteEvents.length})`} color="bg-green-900 text-green-300" />}
+              {noteLoot.length > 0 && <Badge label={`Loot (${noteLoot.length})`} color="bg-yellow-900 text-yellow-300" />}
+              {noteThreads.length > 0 && <Badge label={`Threads (${noteThreads.length})`} color="bg-cyan-900 text-cyan-300" />}
+              {noteQuestList.length > 0 && <Badge label={`Quests (${noteQuestList.length})`} color="bg-orange-900 text-orange-300" />}
+            </div>
+          </div>
           <div className="flex items-center gap-2 shrink-0">
             {hasKnownExtras && (
               <button onClick={onToggle} className="text-gray-400 hover:text-gray-200 transition-colors p-1">
@@ -107,7 +116,7 @@ function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes,
             </button>
           </div>
         </div>
-        <div className="text-xs text-gray-500 mt-2 flex items-center gap-3">
+        <div className="text-xs text-gray-500 mt-3 flex items-center gap-3">
           <span>{new Date(note.created_at).toLocaleString()}</span>
           <span>{note.source_transcript_ids.length} transcript{note.source_transcript_ids.length !== 1 ? 's' : ''}</span>
         </div>
@@ -206,6 +215,14 @@ function NoteCard({ note, gameId, expanded, onToggle, combat, decisions, quotes,
         </div>
       )}
     </div>
+  )
+}
+
+function Badge({ label, color }: { label: string; color: string }) {
+  return (
+    <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-medium ${color}`}>
+      {label}
+    </span>
   )
 }
 
