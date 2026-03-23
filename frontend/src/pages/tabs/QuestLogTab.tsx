@@ -43,7 +43,7 @@ function QuestHistorySection({ questId }: { questId: number }) {
 }
 
 export default function QuestLogTab({ gameId }: { gameId: number }) {
-  const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('active')
+  const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all')
   const [showAdd, setShowAdd] = useState(false)
   const [newQuest, setNewQuest] = useState({ name: '', description: '' })
   const [editing, setEditing] = useState<number | null>(null)
@@ -244,6 +244,11 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${STATUS_BADGE[quest.status]}`}>
                             {quest.status}
                           </span>
+                          {linkedThreads.filter(t => !t.is_resolved).length > 0 && (
+                            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-red-900 text-red-200 border border-red-700">
+                              {linkedThreads.filter(t => !t.is_resolved).length} open
+                            </span>
+                          )}
                           {isEditing ? (
                             <input
                               value={editValues.name ?? ''}
@@ -302,12 +307,24 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                     {/* Description */}
                     <div className="px-4 pb-3">
                       {isEditing ? (
-                        <textarea
-                          value={editValues.description ?? ''}
-                          onChange={e => setEditValues(v => ({ ...v, description: e.target.value }))}
-                          rows={3}
-                          className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-amber-500 resize-none"
-                        />
+                        <div className="grid gap-3">
+                          <textarea
+                            value={editValues.description ?? ''}
+                            onChange={e => setEditValues(v => ({ ...v, description: e.target.value }))}
+                            rows={3}
+                            className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-amber-500 resize-none"
+                          />
+                          <select
+                            value={editValues.quest_giver_entity_id ?? ''}
+                            onChange={e => setEditValues(v => ({ ...v, quest_giver_entity_id: e.target.value ? Number(e.target.value) : null }))}
+                            className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                          >
+                            <option value="" label="No quest giver" />
+                            {(entities as Entity[]).map(e => (
+                              <option key={e.id} value={e.id} label={e.name} />
+                            ))}
+                          </select>
+                        </div>
                       ) : (
                         <p className="text-sm text-gray-300">{quest.description}</p>
                       )}
