@@ -104,7 +104,7 @@ class _EntitySearchInput(BaseModel):
     query: str = PydanticField(description="Natural language search query")
     entity_type: Optional[EntityType] = PydanticField(
         default=None,
-        description="Optional filter: npc, location, quest, item, faction, or other. Leave blank to search all.",
+        description="Optional filter: npc, location, item, faction, or other. Leave blank to search all.",
     )
 
 
