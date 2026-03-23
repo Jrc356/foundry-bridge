@@ -5,12 +5,11 @@ import { createEntity, deleteEntity, getEntities, updateEntity } from '../../api
 import { TabHeader } from '../../components/TabHeader'
 import type { Entity } from '../../types'
 
-const ENTITY_TYPES = ['npc', 'location', 'quest', 'item', 'faction', 'other'] as const
+const ENTITY_TYPES = ['npc', 'location', 'item', 'faction', 'other'] as const
 
 const TYPE_COLORS: Record<string, string> = {
   npc: 'bg-purple-900 text-purple-200',
   location: 'bg-emerald-900 text-emerald-200',
-  quest: 'bg-amber-900 text-amber-200',
   item: 'bg-blue-900 text-blue-200',
   faction: 'bg-red-900 text-red-200',
   other: 'bg-gray-700 text-gray-300',

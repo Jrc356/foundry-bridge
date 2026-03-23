@@ -153,7 +153,7 @@ async def _run_pipeline(game_id: int) -> None:
         note_summary=note_output.summary,
         source_transcript_ids=source_ids,
         entities=[e.model_dump(mode="json") for e in note_output.entities],
-        threads_opened=note_output.threads_opened,
+        threads_opened=[t.model_dump() for t in note_output.threads_opened],
         threads_closed=[
             {"id": tid, "resolution": thread_resolutions_int.get(tid, "")}
             for tid in note_output.threads_closed
@@ -163,6 +163,9 @@ async def _run_pipeline(game_id: int) -> None:
         loot=[item.model_dump() for item in note_output.loot],
         combat_updates=[c.model_dump() for c in note_output.combat_updates],
         important_quotes=[q.model_dump() for q in note_output.important_quotes],
+        quests_opened=[q.model_dump() for q in note_output.quests_opened],
+        quests_completed=note_output.quests_completed,
+        quests_updated=[q.model_dump() for q in note_output.quests_updated],
     )
     await _write_embeddings_for_pipeline_result(pipeline_result)
     end_time = datetime.now().isoformat()

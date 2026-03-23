@@ -30,7 +30,6 @@ class Base(DeclarativeBase):
 class EntityType(str, Enum):
     npc = "npc"
     location = "location"
-    quest = "quest"
     item = "item"
     faction = "faction"
     other = "other"
@@ -126,6 +125,7 @@ class Thread(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by_note_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("notes.id"), nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    quest_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("quests.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -184,9 +184,37 @@ class Loot(Base):
     game_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("games.id"), nullable=False)
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
     acquired_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    quest_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("quests.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
     __table_args__ = (UniqueConstraint("game_id", "item_name", "acquired_by", name="uq_loot_game_item_acquirer"),)
+
+
+class Quest(Base):
+    __tablename__ = "quests"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    game_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("games.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
+    quest_giver_entity_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("entities.id"), nullable=True
+    )
+    note_ids: Mapped[list] = mapped_column(
+        ARRAY(BigInteger), nullable=False, server_default=sa.text("'{}'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("game_id", "name", name="uq_quests_game_name"),
+    )
 
 
 # ── Association tables (join tables for many-to-many) ───────────────────────

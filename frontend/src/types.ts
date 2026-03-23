@@ -19,7 +19,7 @@ export interface Note {
 export interface Entity {
   id: number;
   game_id: number;
-  entity_type: 'npc' | 'location' | 'quest' | 'item' | 'faction' | 'other';
+  entity_type: 'npc' | 'location' | 'item' | 'faction' | 'other';
   name: string;
   description: string;
   created_at: string;
@@ -34,6 +34,7 @@ export interface Thread {
   resolved_at: string | null;
   resolution: string | null;
   resolved_by_note_id: number | null;
+  quest_id: number | null;
   created_at: string;
 }
 
@@ -56,7 +57,20 @@ export interface Loot {
   game_id: number;
   item_name: string;
   acquired_by: string;
+  quest_id: number | null;
   created_at: string;
+}
+
+export interface Quest {
+  id: number;
+  game_id: number;
+  name: string;
+  description: string;
+  status: 'active' | 'completed';
+  quest_giver_entity_id: number | null;
+  note_ids: number[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Decision {

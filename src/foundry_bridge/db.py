@@ -22,6 +22,7 @@ from foundry_bridge.models import (
     Loot,
     Note,
     PlayerCharacter,
+    Quest,
     Thread,
     Transcript,
     notes_events_table,
@@ -231,6 +232,7 @@ class PipelineWriteResult:
     decision_ids: list[int]
     loot_ids: list[int]
     combat_ids: list[int]
+    quest_ids: list[int]
 
 
 async def write_note_pipeline_result(
@@ -239,13 +241,16 @@ async def write_note_pipeline_result(
     note_summary: str,
     source_transcript_ids: list[int],
     entities: list[dict],
-    threads_opened: list[str],
+    threads_opened: list[dict],  # list of {"text": str, "quest_id": Optional[int]}
     threads_closed: list[dict],  # list of {"id": int, "resolution": str}
     events: list[str],
     decisions: list[dict],       # list of {"decision": str, "made_by": str}
-    loot: list[dict],            # list of {"item_name": str, "acquired_by": str}
+    loot: list[dict],            # list of {"item_name": str, "acquired_by": str, "quest_id": Optional[int]}
     combat_updates: list[dict],  # list of {"encounter": str, "outcome": str}
     important_quotes: list[dict],
+    quests_opened: list[dict],   # list of {"name": str, "description": str, "quest_giver_entity_id": Optional[int]}
+    quests_completed: list[str], # list of quest names
+    quests_updated: list[dict],  # list of {"name": str, "description"?: str, "status"?: str, "quest_giver_entity_id"?: int}
 ) -> PipelineWriteResult:
     """Atomically persist all outputs from a note-generation pipeline run.
 
@@ -254,10 +259,12 @@ async def write_note_pipeline_result(
     """
     logger.info(
         "Writing note pipeline result: game_id=%d transcripts=%d entities=%d "
-        "threads_opened=%d threads_closed=%d events=%d decisions=%d loot=%d combat=%d quotes=%d",
+        "threads_opened=%d threads_closed=%d events=%d decisions=%d loot=%d combat=%d quotes=%d "
+        "quests_opened=%d quests_completed=%d quests_updated=%d",
         game_id, len(source_transcript_ids), len(entities),
         len(threads_opened), len(threads_closed), len(events),
         len(decisions), len(loot), len(combat_updates), len(important_quotes),
+        len(quests_opened), len(quests_completed), len(quests_updated),
     )
     inserted_entity_ids: list[int] = []
     inserted_thread_ids: list[int] = []
@@ -266,6 +273,7 @@ async def write_note_pipeline_result(
     inserted_decision_ids: list[int] = []
     inserted_loot_ids: list[int] = []
     inserted_combat_ids: list[int] = []
+    inserted_quest_ids: list[int] = []
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -299,14 +307,83 @@ async def write_note_pipeline_result(
                 if entity_id is not None:
                     inserted_entity_ids.append(entity_id)
 
-            # 3. Create new threads; collect IDs via flush
-            for text in threads_opened:
-                new_thread = Thread(game_id=game_id, text=text)
+            # 3. Upsert quests from quests_opened (new active quests)
+            for q in quests_opened:
+                quest_stmt = pg_insert(Quest).values(
+                    game_id=game_id,
+                    name=q["name"],
+                    description=q["description"],
+                    status="active",
+                    quest_giver_entity_id=q.get("quest_giver_entity_id"),
+                    note_ids=[note_id],
+                )
+                quest_stmt = quest_stmt.on_conflict_do_update(
+                    constraint="uq_quests_game_name",
+                    set_={
+                        "description": quest_stmt.excluded.description,
+                        "note_ids": sa.func.array_append(Quest.note_ids, note_id),
+                        "updated_at": sa.func.now(),
+                    },
+                ).returning(Quest.id)
+                quest_result = await session.execute(quest_stmt)
+                quest_id_val = quest_result.scalar()
+                if quest_id_val is not None:
+                    inserted_quest_ids.append(quest_id_val)
+
+            # 4. Mark quests as completed
+            for quest_name in quests_completed:
+                await session.execute(
+                    sa.update(Quest)
+                    .where(Quest.game_id == game_id, Quest.name == quest_name)
+                    .values(
+                        status="completed",
+                        note_ids=sa.func.array_append(Quest.note_ids, note_id),
+                        updated_at=sa.func.now(),
+                    )
+                )
+
+            # 5. Upsert quests_updated (partial updates to existing quests)
+            for qu in quests_updated:
+                upd: dict = {
+                    "note_ids": sa.func.array_append(Quest.note_ids, note_id),
+                    "updated_at": sa.func.now(),
+                }
+                if qu.get("description") is not None:
+                    upd["description"] = qu["description"]
+                if qu.get("status") is not None:
+                    upd["status"] = qu["status"]
+                if qu.get("quest_giver_entity_id") is not None:
+                    upd["quest_giver_entity_id"] = qu["quest_giver_entity_id"]
+                await session.execute(
+                    sa.update(Quest)
+                    .where(Quest.game_id == game_id, Quest.name == qu["name"])
+                    .values(**upd)
+                )
+
+            # 6. Create new threads; collect IDs via flush
+            for thread_data in threads_opened:
+                text = thread_data["text"]
+                raw_quest_id = thread_data.get("quest_id")
+                safe_quest_id: Optional[int] = None
+                if raw_quest_id is not None:
+                    qcheck = await session.execute(
+                        sa.select(Quest.id).where(
+                            Quest.id == raw_quest_id, Quest.game_id == game_id
+                        )
+                    )
+                    if qcheck.scalar():
+                        safe_quest_id = raw_quest_id
+                    else:
+                        logger.warning(
+                            "game %d: thread references unknown quest_id=%d; nullifying",
+                            game_id, raw_quest_id,
+                        )
+                new_thread = Thread(game_id=game_id, text=text, quest_id=safe_quest_id)
                 session.add(new_thread)
                 await session.flush()
                 inserted_thread_ids.append(new_thread.id)
 
-            # 4. Resolve threads (three-tier validation: missing / cross-game / already resolved)
+            # 7. Resolve threads (three-tier validation: missing / cross-game / already resolved)
             if threads_closed:
                 closed_ids = [t["id"] for t in threads_closed]
                 resolutions = {t["id"]: t.get("resolution", "") for t in threads_closed}
@@ -349,7 +426,7 @@ async def write_note_pipeline_result(
                         )
                     )
 
-            # 5. Insert decisions; collect IDs via flush
+            # 8. Insert decisions; collect IDs via flush
             for d in decisions:
                 d_obj = Decision(
                     game_id=game_id, note_id=note_id,
@@ -359,7 +436,7 @@ async def write_note_pipeline_result(
                 await session.flush()
                 inserted_decision_ids.append(d_obj.id)
 
-            # 6. Upsert events + m2m link to note; collect IDs
+            # 9. Upsert events + m2m link to note; collect IDs
             for text in events:
                 event_stmt = (
                     pg_insert(Event)
@@ -412,8 +489,27 @@ async def write_note_pipeline_result(
                     .values(note_id=note_id, loot_id=loot_id)
                     .on_conflict_do_nothing()
                 )
+                # Link loot to a quest if provided and valid
+                raw_loot_quest_id = item.get("quest_id")
+                if raw_loot_quest_id is not None:
+                    lqcheck = await session.execute(
+                        sa.select(Quest.id).where(
+                            Quest.id == raw_loot_quest_id, Quest.game_id == game_id
+                        )
+                    )
+                    if lqcheck.scalar():
+                        await session.execute(
+                            sa.update(Loot)
+                            .where(Loot.id == loot_id)
+                            .values(quest_id=raw_loot_quest_id)
+                        )
+                    else:
+                        logger.warning(
+                            "game %d: loot '%s' references unknown quest_id=%d; ignoring",
+                            game_id, item["item_name"], raw_loot_quest_id,
+                        )
 
-            # 8. Insert combat_updates; collect IDs via flush
+            # 11. Insert combat_updates; collect IDs via flush
             for c in combat_updates:
                 c_obj = CombatUpdate(
                     game_id=game_id, note_id=note_id,
@@ -423,7 +519,7 @@ async def write_note_pipeline_result(
                 await session.flush()
                 inserted_combat_ids.append(c_obj.id)
 
-            # 9. Insert important_quotes (validate transcript_id against current batch)
+            # 12. Insert important_quotes (validate transcript_id against current batch)
             valid_transcript_ids = set(source_transcript_ids)
             for q in important_quotes:
                 raw_tid = q.get("transcript_id")
@@ -439,7 +535,7 @@ async def write_note_pipeline_result(
                     speaker=q.get("speaker"),
                 ))
 
-            # 10. Mark all source transcripts as processed
+            # 13. Mark all source transcripts as processed
             await session.execute(
                 sa.update(Transcript)
                 .where(Transcript.id.in_(source_transcript_ids))
@@ -458,6 +554,7 @@ async def write_note_pipeline_result(
         decision_ids=inserted_decision_ids,
         loot_ids=inserted_loot_ids,
         combat_ids=inserted_combat_ids,
+        quest_ids=inserted_quest_ids,
     )
 
 
@@ -760,8 +857,39 @@ async def search_combat(game_id: int, query: str, k: int = 6) -> list[CombatUpda
     vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
     return _rrf_merge(vec_rows, txt_rows, k=k)
 
+async def search_quests(game_id: int, query: str, k: int = 8) -> list[Quest]:
+    query_vec = (await _embed_texts([query], as_query=True))[0]
+    fetch = k * 3
 
-# ── Embedding maintenance helpers ──────────────────────────────────────────────
+    async def _vec() -> list[Quest]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Quest)
+                .where(Quest.game_id == game_id, Quest.embedding.is_not(None))
+                .order_by(Quest.embedding.cosine_distance(query_vec))
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    async def _txt() -> list[Quest]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa.select(Quest)
+                .where(
+                    Quest.game_id == game_id,
+                    sa.func.to_tsvector(
+                        "english",
+                        sa.func.concat(Quest.name, " ", sa.func.coalesce(Quest.description, "")),
+                    ).op("@@")(sa.func.plainto_tsquery("english", query)),
+                )
+                .limit(fetch)
+            )
+            return list(result.scalars().all())
+
+    vec_rows, txt_rows = await asyncio.gather(_vec(), _txt())
+    return _rrf_merge(vec_rows, txt_rows, k=k)
+
+
 
 async def embed_unembedded_rows(game_id: int) -> None:
     """Best-effort: compute embeddings for any rows that are missing them.
@@ -779,6 +907,7 @@ async def embed_unembedded_rows(game_id: int) -> None:
         (Decision,     lambda d: f"Decision by {d.made_by}: {d.decision}"),
         (Loot,         lambda loot: f"Loot acquired by {loot.acquired_by}: {loot.item_name}"),
         (CombatUpdate, lambda c: f"Combat encounter: {c.encounter} \u2014 Outcome: {c.outcome}"),
+        (Quest,        lambda q: f"[Quest] {q.name}: {q.description}"),
     ]
     try:
         # Phase 1: Collect (model_cls, pk, text) via short read session
@@ -874,6 +1003,12 @@ async def _write_embeddings_for_pipeline_result(result: PipelineWriteResult) -> 
                 combat = await session.get(CombatUpdate, cid)
                 if combat:
                     to_embed.append((CombatUpdate, cid, f"Combat encounter: {combat.encounter} — Outcome: {combat.outcome}"))
+
+            # Quests
+            for qid in result.quest_ids:
+                quest = await session.get(Quest, qid)
+                if quest:
+                    to_embed.append((Quest, qid, f"[Quest] {quest.name}: {quest.description}"))
 
         if not to_embed:
             return

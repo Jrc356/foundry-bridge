@@ -3,6 +3,7 @@ import {
   BookOpen,
   ChevronLeft,
   Dices,
+  MapPin,
   MessageCircle,
   ScrollText,
   Search,
@@ -22,12 +23,14 @@ import EventsTab from './tabs/EventsTab'
 import LootTab from './tabs/LootTab'
 import NotesTab from './tabs/NotesTab'
 import PlayerCharactersTab from './tabs/PlayerCharactersTab'
+import QuestLogTab from './tabs/QuestLogTab'
 import QuotesTab from './tabs/QuotesTab'
 import SearchTab from './tabs/SearchTab'
 import ThreadsTab from './tabs/ThreadsTab'
 import TranscriptsTab from './tabs/TranscriptsTab'
 
 const TABS = [
+  { id: 'quests', label: 'Quest Log', icon: MapPin },
   { id: 'search', label: 'Search', icon: Search },
   { id: 'notes', label: 'Notes', icon: BookOpen },
   { id: 'entities', label: 'Entities', icon: Shield },
@@ -70,7 +73,8 @@ export default function GameDetail() {
       {/* Content */}
       <main className="flex-1 overflow-y-auto">
         <Routes>
-          <Route index element={<Navigate to="notes" replace />} />
+          <Route index element={<Navigate to="quests" replace />} />
+          <Route path="quests" element={<QuestLogTab gameId={gameId} />} />
           <Route path="search" element={<SearchTab gameId={gameId} />} />
           <Route path="notes" element={<NotesTab gameId={gameId} />} />
           <Route path="entities" element={<EntitiesTab gameId={gameId} />} />

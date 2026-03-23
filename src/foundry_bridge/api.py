@@ -36,6 +36,7 @@ from foundry_bridge.models import (
     Loot,
     Note,
     PlayerCharacter,
+    Quest,
     Thread,
     Transcript,
 )
@@ -123,6 +124,7 @@ class ThreadOut(BaseModel):
     resolved_at: Optional[datetime]
     resolution: Optional[str]
     resolved_by_note_id: Optional[int]
+    quest_id: Optional[int]
     created_at: datetime
 
     class Config:
@@ -138,6 +140,7 @@ class ThreadUpdate(BaseModel):
     is_resolved: Optional[bool] = None
     resolution: Optional[str] = None
     resolved_by_note_id: Optional[int] = None
+    quest_id: Optional[int] = None
 
 
 class TranscriptOut(BaseModel):
@@ -162,6 +165,7 @@ class LootOut(BaseModel):
     game_id: int
     item_name: str
     acquired_by: str
+    quest_id: Optional[int]
     created_at: datetime
 
     class Config:
@@ -171,6 +175,40 @@ class LootOut(BaseModel):
 class LootCreate(BaseModel):
     item_name: str
     acquired_by: str
+
+
+class LootUpdate(BaseModel):
+    item_name: Optional[str] = None
+    acquired_by: Optional[str] = None
+    quest_id: Optional[int] = None
+
+
+class QuestOut(BaseModel):
+    id: int
+    game_id: int
+    name: str
+    description: str
+    status: str
+    quest_giver_entity_id: Optional[int]
+    note_ids: list[int]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class QuestCreate(BaseModel):
+    name: str
+    description: str
+    quest_giver_entity_id: Optional[int] = None
+
+
+class QuestUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    quest_giver_entity_id: Optional[int] = None
 
 
 class DecisionOut(BaseModel):
@@ -462,6 +500,76 @@ async def delete_loot(loot_id: int, db: AsyncSession = Depends(get_db)):
     if not loot:
         raise HTTPException(status_code=404, detail="Loot not found")
     await db.delete(loot)
+    await db.commit()
+
+
+@app.patch("/api/loot/{loot_id}", response_model=LootOut)
+async def update_loot(loot_id: int, body: LootUpdate, db: AsyncSession = Depends(get_db)):
+    loot = await db.get(Loot, loot_id)
+    if not loot:
+        raise HTTPException(status_code=404, detail="Loot not found")
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(loot, field, value)
+    await db.commit()
+    await db.refresh(loot)
+    return loot
+
+
+# ── Quests ────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/games/{game_id}/quests", response_model=list[QuestOut])
+async def list_quests(
+    game_id: int,
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    q = sa.select(Quest).where(Quest.game_id == game_id)
+    if status:
+        q = q.where(Quest.status == status)
+    q = q.order_by(Quest.created_at.desc())
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+@app.post("/api/games/{game_id}/quests", response_model=QuestOut, status_code=201)
+async def create_quest(game_id: int, body: QuestCreate, db: AsyncSession = Depends(get_db)):
+    quest = Quest(
+        game_id=game_id,
+        name=body.name,
+        description=body.description,
+        status="active",
+        quest_giver_entity_id=body.quest_giver_entity_id,
+        note_ids=[],
+    )
+    db.add(quest)
+    await db.commit()
+    await db.refresh(quest)
+    return quest
+
+
+@app.patch("/api/quests/{quest_id}", response_model=QuestOut)
+async def update_quest(quest_id: int, body: QuestUpdate, db: AsyncSession = Depends(get_db)):
+    quest = await db.get(Quest, quest_id)
+    if not quest:
+        raise HTTPException(status_code=404, detail="Quest not found")
+    updates = body.model_dump(exclude_none=True)
+    if "status" in updates and updates["status"] not in ("active", "completed"):
+        raise HTTPException(status_code=400, detail="status must be 'active' or 'completed'")
+    for field, value in updates.items():
+        setattr(quest, field, value)
+    quest.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(quest)
+    return quest
+
+
+@app.delete("/api/quests/{quest_id}", status_code=204)
+async def delete_quest(quest_id: int, db: AsyncSession = Depends(get_db)):
+    quest = await db.get(Quest, quest_id)
+    if not quest:
+        raise HTTPException(status_code=404, detail="Quest not found")
+    await db.delete(quest)
     await db.commit()
 
 

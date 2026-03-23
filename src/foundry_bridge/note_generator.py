@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from langchain.agents import create_agent
 from langchain_core.tools import StructuredTool
@@ -25,7 +25,8 @@ You will receive:
 - **Player characters**: names of the PCs — do NOT output these as entities
 
 Use the following tools to look up relevant campaign history on demand:
-- `search_entities`: Find existing NPCs, locations, quests, items, or factions
+- `search_quests`: Find existing quests by name or topic. Returns id, name, status, description.
+- `search_entities`: Find existing NPCs, locations, items, or factions
 - `search_open_threads`: Find open unresolved plot threads by topic
 - `search_resolved_threads`: Verify whether a thread was already resolved
 - `search_events`: Find past story events for context or deduplication
@@ -35,6 +36,10 @@ Use the following tools to look up relevant campaign history on demand:
 - `search_combat`: Find past combat encounters
 
 REQUIRED tool-use rules:
+- Before outputting any quest in `quests_opened`, you MUST call `search_quests` to check if
+  it already exists. If found, put it in `quests_updated` instead.
+- Before setting `quest_id` on a thread or loot item, you MUST call `search_quests` to
+  find the correct quest ID. Do NOT guess or invent quest IDs.
 - Before adding any entry to `threads_opened`, you MUST call `search_open_threads`
   with a relevant query to check if the thread is already open. If found, do not re-open it.
 - Before adding any IDs to `threads_closed`, you MUST call `search_open_threads` with
@@ -50,7 +55,9 @@ Guidelines:
 - Write the summary in past tense, 3–6 sentences.
 - Decisions are any agreements, plans, or choices the party made — "made_by" may be
   the group name, a PC name, or "the party".
-- Loot entries must specify who acquired the item (use "the party" if shared).
+- Loot entries must specify who acquired the item (use "the party" if shared). If the
+  loot was received as part of a quest reward, include the quest_id (looked up via
+  search_quests).
 - Combat entries should name the encounter and describe its outcome briefly.
 - Important quotes must be verbatim lines from the transcripts. Only include
     quotes that are meaningfully impactful to the scene — emotionally charged,
@@ -64,12 +71,19 @@ Guidelines:
     Prefer at most 4 well-chosen quotes per note. Transcripts are formatted as
     "[ID:N][SPEAKER]: text"; include the N value as `transcript_id` and SPEAKER
     as `speaker` for each ImportantQuoteOutput.
-- Entities are NPCs, locations, quests, items, or factions — never player characters.
+- Entities are NPCs, locations, items, or factions — never player characters, and
+  NEVER quests (use quests_opened or quests_updated for quest information).
 - Events are a catch-all for notable story moments not captured in other fields (e.g. "Party arrived at the city of Neverwinter").
 - Open new threads only for unresolved mysteries or plot hooks that emerged this session.
+  If a thread is directly related to a quest, look up the quest ID via search_quests
+  and include it as quest_id.
 - Close threads (by ID) only if they were clearly resolved in the transcripts.
   For each closed thread, provide a brief resolution text in `thread_resolutions`
   (e.g. "The party found the missing key in the dungeon chest.").
+- Quests: use quests_opened for NEW quests discovered this session (after checking
+  search_quests). Use quests_completed (quest names only) for quests clearly wrapped up.
+  Use quests_updated for quests with new information but not yet finished.
+  For quest_giver_entity_id, use search_entities to look up the NPC and pass their ID.
 """
 
 _MODEL_STR = f"{os.environ.get('MODEL_PROVIDER', 'openai')}:{os.environ.get('MODEL', 'gpt-5.4')}"
@@ -96,6 +110,35 @@ class _EntitySearchInput(BaseModel):
 
 def make_game_tools(game_id: int) -> list:
     """Return the 8 search tools bound to a specific game_id."""
+
+    async def search_quests(query: str) -> str:
+        start_time = time.time()
+        logger.debug("search_quests invoked", extra={"game_id": game_id, "query": query})
+        try:
+            rows = await db.search_quests(game_id, query)
+            result_count = len(rows)
+            elapsed = time.time() - start_time
+            if result_count == 0:
+                logger.info(
+                    "search_quests returned no results",
+                    extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
+                )
+                return "No matching quests found."
+            logger.info(
+                "search_quests succeeded",
+                extra={"game_id": game_id, "query": query, "result_count": result_count, "elapsed_sec": elapsed},
+            )
+            return "\n".join(
+                f"ID {r.id} [{r.status}] {r.name}: {r.description}" for r in rows
+            )
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "search_quests failed",
+                exc_info=True,
+                extra={"game_id": game_id, "query": query, "elapsed_sec": elapsed, "error": str(e)},
+            )
+            return f"Error searching quests: {str(e)}"
 
     async def search_entities(query: str, entity_type: Optional[EntityType] = None) -> str:
         start_time = time.time()
@@ -421,9 +464,15 @@ def make_game_tools(game_id: int) -> list:
 
     return [
         StructuredTool.from_function(
+            coroutine=search_quests,
+            name="search_quests",
+            description="Find existing quests by name or topic. Returns id, name, status, description. REQUIRED before opening new quests or setting quest_id on threads/loot.",
+            args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
             coroutine=search_entities,
             name="search_entities",
-            description="Find existing NPCs, locations, quests, items, or factions by description.",
+            description="Find existing NPCs, locations, items, or factions by description.",
             args_schema=_EntitySearchInput,
         ),
         StructuredTool.from_function(
@@ -476,6 +525,7 @@ def make_game_tools(game_id: int) -> list:
 class LootItem(BaseModel):
     item_name: str
     acquired_by: str  # PC name or "the party"
+    quest_id: Optional[int] = None  # ID from search_quests if this was a quest reward
 
 
 class ImportantQuoteOutput(BaseModel):
@@ -495,19 +545,37 @@ class Decision(BaseModel):
 
 
 class EntityOutput(BaseModel):
-    entity_type: EntityType  # npc | location | quest | item | faction | other
+    entity_type: EntityType  # npc | location | item | faction | other (NOT quest — use quests_opened)
     name: str
     description: str
+
+
+class ThreadOutput(BaseModel):
+    text: str
+    quest_id: Optional[int] = None  # ID from search_quests if this thread belongs to a quest
+
+
+class QuestOutput(BaseModel):
+    name: str
+    description: str
+    quest_giver_entity_id: Optional[int] = None  # entity ID from search_entities
+
+
+class QuestUpdateOutput(BaseModel):
+    name: str  # used to look up the existing quest
+    description: Optional[str] = None
+    status: Optional[Literal["active", "completed"]] = None
+    quest_giver_entity_id: Optional[int] = None
 
 
 class NoteOutput(BaseModel):
     summary: str = Field(description="Brief 2–4 sentence summary of events in this transcript batch")
     events: list[str] = Field(description="Notable plot/story events not covered by other specific fields (catch-all)")
     decisions: list[Decision] = Field(description="Decisions made by players; each has decision text and made_by")
-    loot: list[LootItem] = Field(description="Items acquired; each has item name and acquired_by (PC name or 'the party')")
+    loot: list[LootItem] = Field(description="Items acquired; each has item name, acquired_by (PC name or 'the party'), and optional quest_id")
     combat_updates: list[CombatUpdate] = Field(description="Combat encounters; each has encounter name and outcome")
-    entities: list[EntityOutput] = Field(description="NPCs, locations, quests, items, factions, or other notable entities")
-    threads_opened: list[str] = Field(description="New unresolved questions or plot threads to track (plain text)")
+    entities: list[EntityOutput] = Field(description="NPCs, locations, items, factions, or other notable entities — NEVER quests")
+    threads_opened: list[ThreadOutput] = Field(description="New unresolved questions or plot threads; each has text and optional quest_id")
     threads_closed: list[int] = Field(description="DB IDs of currently-open threads that have been resolved in this session")
     thread_resolutions: dict[str, str] = Field(
         default_factory=dict,
@@ -515,6 +583,18 @@ class NoteOutput(BaseModel):
     )
     important_quotes: list[ImportantQuoteOutput] = Field(
         description="Verbatim lines from the transcripts that are significant; include the ID from the [ID:N] prefix if known and the speaker name"
+    )
+    quests_opened: list[QuestOutput] = Field(
+        default_factory=list,
+        description="New quests discovered this session (after verifying with search_quests they don't already exist)",
+    )
+    quests_completed: list[str] = Field(
+        default_factory=list,
+        description="Names of quests that were clearly completed this session",
+    )
+    quests_updated: list[QuestUpdateOutput] = Field(
+        default_factory=list,
+        description="Existing quests that have new information but are not yet complete",
     )
 
 
