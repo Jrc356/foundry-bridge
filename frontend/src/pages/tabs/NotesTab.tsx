@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { deleteNote, getCombat, getDecisions, getNotes, getQuotes, getNoteEvents, getNoteLoot, getNoteThreads, getNoteQuests } from '../../api'
+import { deleteNote, getCombat, getDecisions, getNotes, getQuotes, getNoteEvents, getNoteLoot, getThreads, getQuests } from '../../api'
 import type { CombatUpdate, Decision, ImportantQuote, Note, Event, Loot, Thread, Quest } from '../../types'
 import { TabHeader } from '../../components/TabHeader'
 
@@ -11,8 +11,8 @@ export default function NotesTab({ gameId }: { gameId: number }) {
   const { data: combat = [] } = useQuery({ queryKey: ['combat', gameId], queryFn: () => getCombat(gameId) })
   const { data: decisions = [] } = useQuery({ queryKey: ['decisions', gameId], queryFn: () => getDecisions(gameId) })
   const { data: quotes = [] } = useQuery({ queryKey: ['quotes', gameId], queryFn: () => getQuotes(gameId) })
-  const { data: threads = [] } = useQuery({ queryKey: ['threads', gameId], queryFn: () => getNoteThreads(gameId, 0).catch(() => []) })
-  const { data: quests = [] } = useQuery({ queryKey: ['quests', gameId], queryFn: () => getNoteQuests(gameId, 0).catch(() => []) })
+  const { data: threads = [] } = useQuery({ queryKey: ['threads', gameId], queryFn: () => getThreads(gameId) })
+  const { data: quests = [] } = useQuery({ queryKey: ['quests', gameId], queryFn: () => getQuests(gameId) })
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
   const deleteMut = useMutation({
