@@ -53,7 +53,7 @@ export default function GameDetail() {
   if (!game) return <div className="min-h-screen bg-gray-950 text-red-400 p-8">Campaign not found</div>
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 flex">
+    <div className="h-screen bg-gray-950 text-gray-100 flex overflow-hidden">
       {/* Sidebar */}
       <aside className="w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
         <div className="p-4 border-b border-gray-800">
@@ -71,7 +71,7 @@ export default function GameDetail() {
       </aside>
 
       {/* Content */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-auto">
         <Routes>
           <Route index element={<Navigate to="quests" replace />} />
           <Route path="quests" element={<QuestLogTab gameId={gameId} />} />
