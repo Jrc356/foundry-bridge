@@ -53,6 +53,7 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
   const [linkedOpen, setLinkedOpen] = useState<Set<number>>(new Set())
   const [notesOpen, setNotesOpen] = useState<Set<number>>(new Set())
   const [threadsClosed, setThreadsClosed] = useState<Set<number>>(new Set())
+  const [expandedNotes, setExpandedNotes] = useState<Set<number>>(new Set())
   const qc = useQueryClient()
 
   const status = filter === 'all' ? undefined : filter
