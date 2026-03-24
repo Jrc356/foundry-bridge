@@ -248,7 +248,21 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                     {/* Card header */}
                     <div className="flex items-start justify-between gap-4 p-4">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                        {/* Quest name */}
+                        <div className="mb-2">
+                          {isEditing ? (
+                            <input
+                              value={editValues.name ?? ''}
+                              onChange={e => setEditValues(v => ({ ...v, name: e.target.value }))}
+                              className="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-amber-500 w-full"
+                            />
+                          ) : (
+                            <span className="font-semibold text-gray-100 text-sm block">{quest.name}</span>
+                          )}
+                        </div>
+                        
+                        {/* Badges */}
+                        <div className="flex items-center gap-2 flex-wrap mb-2">
                           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${STATUS_BADGE[quest.status]}`}>
                             {quest.status}
                           </span>
@@ -262,18 +276,11 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                               {quest.note_ids.length} {quest.note_ids.length === 1 ? 'note' : 'notes'}
                             </span>
                           )}
-                          {isEditing ? (
-                            <input
-                              value={editValues.name ?? ''}
-                              onChange={e => setEditValues(v => ({ ...v, name: e.target.value }))}
-                              className="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-amber-500 flex-1"
-                            />
-                          ) : (
-                            <span className="font-semibold text-gray-100 text-sm">{quest.name}</span>
-                          )}
                         </div>
+                        
+                        {/* Quest giver */}
                         {quest.quest_giver_entity_id != null && (
-                          <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
+                          <p className="text-xs text-gray-500 flex items-center gap-1">
                             <User size={11} /> Given by {entityName(quest.quest_giver_entity_id)}
                           </p>
                         )}
