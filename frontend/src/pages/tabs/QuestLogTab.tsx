@@ -51,6 +51,8 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
   const [editValues, setEditValues] = useState<Partial<Quest>>({})
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [linkedOpen, setLinkedOpen] = useState<Set<number>>(new Set())
+  const [notesOpen, setNotesOpen] = useState<Set<number>>(new Set())
+  const [threadsClosed, setThreadsClosed] = useState<Set<number>>(new Set())
   const qc = useQueryClient()
 
   const status = filter === 'all' ? undefined : filter
@@ -113,6 +115,12 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['threads', gameId] }),
   })
 
+  const resolveThreadMut = useMutation({
+    mutationFn: (threadId: number) =>
+      updateThread(threadId, { is_resolved: true }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['threads', gameId] }),
+  })
+
   const toggleExpand = (id: number) =>
     setExpanded(prev => {
       const next = new Set(prev)
@@ -122,6 +130,20 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
 
   const toggleLinked = (id: number) =>
     setLinkedOpen(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+
+  const toggleNotesOpen = (id: number) =>
+    setNotesOpen(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+
+  const toggleThreadsClosed = (id: number) =>
+    setThreadsClosed(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
@@ -350,25 +372,9 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                       )}
                     </div>
 
-                    {/* Expanded: notes, description history, threads, and loot */}
+                    {/* Expanded: description history, threads, session notes, and loot */}
                     {isExpanded && (
                       <div className="border-t border-gray-700 px-4 py-3 grid gap-3">
-                        {/* Session notes */}
-                        {questNotesFor(quest.note_ids).length > 0 && (
-                          <div>
-                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                              Session Notes ({questNotesFor(quest.note_ids).length})
-                            </p>
-                            <ul className="grid gap-2">
-                              {questNotesFor(quest.note_ids).map(n => (
-                                <li key={n.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2">
-                                  <time className="text-gray-500 block mb-0.5">{new Date(n.created_at).toLocaleDateString()}</time>
-                                  <p className="text-gray-300">{n.summary.length > 120 ? n.summary.slice(0, 120) + '…' : n.summary}</p>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
                         {/* Description history - always visible */}
                         <div>
                           <p className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
@@ -377,84 +383,117 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                           </p>
                           <QuestHistorySection questId={quest.id} />
                         </div>
-                        {/* Linked threads and loot - collapsible */}
+                        {/* Threads - collapsible, expanded by default */}
                         <div>
                           <button
-                            onClick={() => toggleLinked(quest.id)}
+                            onClick={() => toggleThreadsClosed(quest.id)}
                             className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 hover:text-gray-300 transition-colors w-full text-left"
                           >
-                            Linked
-                            {linkedOpen.has(quest.id) ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                            Threads ({linkedThreads.length})
+                            {threadsClosed.has(quest.id) ? <ChevronDown size={11} /> : <ChevronUp size={11} />}
                           </button>
-                          {linkedOpen.has(quest.id) && (
+                          {!threadsClosed.has(quest.id) && (
                             <div className="grid gap-3">
-                              {/* Linked threads */}
-                              <div>
-                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                                  Threads ({linkedThreads.length})
-                                </p>
-                                {linkedThreads.length === 0 ? (
-                                  <p className="text-xs text-gray-600">No threads linked yet.</p>
-                                ) : (
-                                  <ul className="grid gap-1.5">
-                                    {linkedThreads.map(t => (
-                                      <li key={t.id} className="flex items-start justify-between gap-2 text-xs bg-gray-900 rounded-lg px-3 py-2">
-                                        <span className={`flex-1 ${t.is_resolved ? 'text-gray-500 line-through' : 'text-gray-300'}`}>
-                                          {t.text}
-                                        </span>
+                              {linkedThreads.length === 0 ? (
+                                <p className="text-xs text-gray-600">No threads linked yet.</p>
+                              ) : (
+                                <ul className="grid gap-1.5">
+                                  {linkedThreads.map(t => (
+                                    <li key={t.id} className="flex items-start justify-between gap-2 text-xs bg-gray-900 rounded-lg px-3 py-2">
+                                      <span className={`flex-1 ${t.is_resolved ? 'text-gray-500 line-through' : 'text-gray-300'}`}>
+                                        {t.text}
+                                      </span>
+                                      <div className="flex gap-1 shrink-0">
+                                        {!t.is_resolved && (
+                                          <button
+                                            onClick={() => resolveThreadMut.mutate(t.id)}
+                                            className="text-gray-600 hover:text-green-400 transition-colors"
+                                            title="Mark as resolved"
+                                          >
+                                            ✓
+                                          </button>
+                                        )}
                                         <button
                                           onClick={() => linkThreadMut.mutate({ threadId: t.id, questId: null })}
-                                          className="text-gray-600 hover:text-red-400 transition-colors shrink-0"
+                                          className="text-gray-600 hover:text-red-400 transition-colors"
                                           title="Unlink from quest"
                                         >
                                           ×
                                         </button>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )}
-                                {unlinkedOpenThreads().length > 0 && (
-                                  <div className="mt-2">
-                                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                                      Link a Thread
-                                    </p>
-                                    <select
-                                      defaultValue=""
-                                      onChange={e => {
-                                        const tid = Number(e.target.value)
-                                        if (tid) linkThreadMut.mutate({ threadId: tid, questId: quest.id })
-                                        e.currentTarget.value = ''
-                                      }}
-                                      className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-amber-500 w-full"
-                                    >
-                                      <option value="" disabled>— select a thread to link —</option>
-                                      {unlinkedOpenThreads().map(t => (
-                                        <option key={t.id} value={t.id}>
-                                          {t.text.length > 80 ? t.text.slice(0, 80) + '…' : t.text}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                )}
-                              </div>
-                              {/* Linked loot */}
-                              {linkedLoot.length > 0 && (
+                                      </div>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                              {unlinkedOpenThreads().length > 0 && (
                                 <div>
                                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                                    Loot ({linkedLoot.length})
+                                    Link a Thread
                                   </p>
-                                  <ul className="grid gap-1.5">
-                                    {linkedLoot.map(l => (
-                                      <li key={l.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2 text-gray-300">
-                                        {l.item_name} <span className="text-gray-500">— {l.acquired_by}</span>
-                                      </li>
+                                  <select
+                                    defaultValue=""
+                                    onChange={e => {
+                                      const tid = Number(e.target.value)
+                                      if (tid) linkThreadMut.mutate({ threadId: tid, questId: quest.id })
+                                      e.currentTarget.value = ''
+                                    }}
+                                    className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-amber-500 w-full"
+                                  >
+                                    <option value="" disabled>— select a thread to link —</option>
+                                    {unlinkedOpenThreads().map(t => (
+                                      <option key={t.id} value={t.id}>
+                                        {t.text.length > 80 ? t.text.slice(0, 80) + '…' : t.text}
+                                      </option>
                                     ))}
-                                  </ul>
+                                  </select>
                                 </div>
                               )}
                             </div>
                           )}
                         </div>
+                        {/* Session notes - collapsible */}
+                        {questNotesFor(quest.note_ids).length > 0 && (
+                          <div>
+                            <button
+                              onClick={() => toggleNotesOpen(quest.id)}
+                              className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 hover:text-gray-300 transition-colors w-full text-left"
+                            >
+                              Session Notes ({questNotesFor(quest.note_ids).length})
+                              {notesOpen.has(quest.id) ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                            </button>
+                            {notesOpen.has(quest.id) && (
+                              <ul className="grid gap-2">
+                                {questNotesFor(quest.note_ids).map(n => (
+                                  <li key={n.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2">
+                                    <time className="text-gray-500 block mb-0.5">{new Date(n.created_at).toLocaleDateString()}</time>
+                                    <p className="text-gray-300">{n.summary.length > 120 ? n.summary.slice(0, 120) + '…' : n.summary}</p>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                        {/* Loot - collapsible */}
+                        {linkedLoot.length > 0 && (
+                          <div>
+                            <button
+                              onClick={() => toggleLinked(quest.id)}
+                              className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 hover:text-gray-300 transition-colors w-full text-left"
+                            >
+                              Loot ({linkedLoot.length})
+                              {linkedOpen.has(quest.id) ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                            </button>
+                            {linkedOpen.has(quest.id) && (
+                              <ul className="grid gap-1.5">
+                                {linkedLoot.map(l => (
+                                  <li key={l.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2 text-gray-300">
+                                    {l.item_name} <span className="text-gray-500">— {l.acquired_by}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
                         <p className="text-xs text-gray-600">
                           Created {new Date(quest.created_at).toLocaleDateString()} ·{' '}
                           {quest.note_ids.length} note{quest.note_ids.length !== 1 ? 's' : ''}
