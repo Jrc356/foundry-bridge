@@ -251,6 +251,13 @@ notes_loot_table = sa.Table(
     sa.Column("loot_id", BigInteger, sa.ForeignKey("loot.id"), primary_key=True),
 )
 
+notes_entities_table = sa.Table(
+    "notes_entities",
+    Base.metadata,
+    sa.Column("note_id", BigInteger, sa.ForeignKey("notes.id"), primary_key=True),
+    sa.Column("entity_id", BigInteger, sa.ForeignKey("entities.id"), primary_key=True),
+)
+
 
 class CombatUpdate(Base):
     __tablename__ = "combat_updates"

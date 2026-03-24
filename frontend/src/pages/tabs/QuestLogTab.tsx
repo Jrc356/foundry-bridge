@@ -6,6 +6,7 @@ import {
   deleteQuest,
   getEntities,
   getLoot,
+  getNotes,
   getQuestHistory,
   getQuests,
   getThreads,
@@ -13,7 +14,7 @@ import {
   updateThread,
 } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
-import type { Entity, Loot, Quest, QuestDescriptionHistory, Thread } from '../../types'
+import type { Entity, Loot, Note, Quest, QuestDescriptionHistory, Thread } from '../../types'
 
 const STATUS_BADGE: Record<Quest['status'], string> = {
   active: 'bg-amber-900 text-amber-200 border border-amber-700',
@@ -68,6 +69,10 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
   const { data: entities = [] } = useQuery({
     queryKey: ['entities', gameId],
     queryFn: () => getEntities(gameId),
+  })
+  const { data: notes = [] } = useQuery({
+    queryKey: ['notes', gameId],
+    queryFn: () => getNotes(gameId),
   })
   const entityName = (id: number | null): string | null => {
     if (id == null) return null
@@ -129,6 +134,9 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
 
   const questThreads = (questId: number): Thread[] =>
     (threads as Thread[]).filter(t => t.quest_id === questId)
+
+  const questNotesFor = (noteIds: number[]): Note[] =>
+    (notes as Note[]).filter(n => noteIds.includes(n.id))
 
   const questLoot = (questId: number): Loot[] =>
     (loot as Loot[]).filter(l => l.quest_id === questId)
@@ -249,6 +257,11 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                               {linkedThreads.filter(t => !t.is_resolved).length} open
                             </span>
                           )}
+                          {quest.note_ids.length > 0 && (
+                            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-900 text-indigo-300 border border-indigo-700">
+                              {quest.note_ids.length} {quest.note_ids.length === 1 ? 'note' : 'notes'}
+                            </span>
+                          )}
                           {isEditing ? (
                             <input
                               value={editValues.name ?? ''}
@@ -330,9 +343,25 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                       )}
                     </div>
 
-                    {/* Expanded: description history, threads, and loot */}
+                    {/* Expanded: notes, description history, threads, and loot */}
                     {isExpanded && (
                       <div className="border-t border-gray-700 px-4 py-3 grid gap-3">
+                        {/* Session notes */}
+                        {questNotesFor(quest.note_ids).length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                              Session Notes ({questNotesFor(quest.note_ids).length})
+                            </p>
+                            <ul className="grid gap-2">
+                              {questNotesFor(quest.note_ids).map(n => (
+                                <li key={n.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2">
+                                  <time className="text-gray-500 block mb-0.5">{new Date(n.created_at).toLocaleDateString()}</time>
+                                  <p className="text-gray-300">{n.summary.length > 120 ? n.summary.slice(0, 120) + '…' : n.summary}</p>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
                         {/* Description history - always visible */}
                         <div>
                           <p className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">

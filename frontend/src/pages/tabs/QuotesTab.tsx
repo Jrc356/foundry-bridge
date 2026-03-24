@@ -1,12 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2 } from 'lucide-react'
-import { deleteQuote, getQuotes } from '../../api'
+import { deleteQuote, getNotes, getQuotes } from '../../api'
+import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
-import type { ImportantQuote } from '../../types'
+import type { ImportantQuote, Note } from '../../types'
 
 export default function QuotesTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: quotes = [], isLoading } = useQuery({ queryKey: ['quotes', gameId], queryFn: () => getQuotes(gameId) })
+  const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const deleteMut = useMutation({
     mutationFn: deleteQuote,
@@ -29,6 +31,7 @@ export default function QuotesTab({ gameId }: { gameId: number }) {
                 <p className="text-gray-200 italic">"{q.text}"</p>
                 {q.speaker && <p className="text-sm text-blue-400 mt-1">— {q.speaker}</p>}
                 <p className="text-xs text-gray-600 mt-1">{new Date(q.created_at).toLocaleDateString()}</p>
+                <NotesBadge notes={(notes as Note[]).filter(n => n.id === q.note_id)} />
               </div>
               <button onClick={() => confirm('Delete quote?') && deleteMut.mutate(q.id)}
                 className="text-gray-600 hover:text-red-400 transition-colors shrink-0"><Trash2 size={14} /></button>

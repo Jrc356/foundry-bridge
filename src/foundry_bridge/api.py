@@ -99,6 +99,7 @@ class EntityOut(BaseModel):
     entity_type: str
     name: str
     description: str
+    note_ids: list[int] = []
     created_at: datetime
     updated_at: datetime
 
@@ -168,6 +169,7 @@ class LootOut(BaseModel):
     item_name: str
     acquired_by: str
     quest_id: Optional[int]
+    note_ids: list[int] = []
     created_at: datetime
 
     class Config:
@@ -246,6 +248,7 @@ class EventOut(BaseModel):
     id: int
     game_id: int
     text: str
+    note_ids: list[int] = []
     created_at: datetime
 
     class Config:
@@ -404,12 +407,30 @@ async def list_entities(
     entity_type: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
+    from foundry_bridge.models import notes_entities_table
     q = sa.select(Entity).where(Entity.game_id == game_id)
     if entity_type:
         q = q.where(Entity.entity_type == entity_type)
     q = q.order_by(Entity.entity_type, Entity.name)
     result = await db.execute(q)
-    return result.scalars().all()
+    entities = list(result.scalars().all())
+    if not entities:
+        return []
+    assoc = await db.execute(
+        sa.select(notes_entities_table.c.entity_id, notes_entities_table.c.note_id)
+        .where(notes_entities_table.c.entity_id.in_([e.id for e in entities]))
+    )
+    note_ids_by_entity: dict[int, list[int]] = {}
+    for entity_id, note_id in assoc.all():
+        note_ids_by_entity.setdefault(entity_id, []).append(note_id)
+    return [
+        EntityOut(
+            id=e.id, game_id=e.game_id, entity_type=e.entity_type, name=e.name,
+            description=e.description, created_at=e.created_at, updated_at=e.updated_at,
+            note_ids=note_ids_by_entity.get(e.id, []),
+        )
+        for e in entities
+    ]
 
 
 @app.post("/api/games/{game_id}/entities", response_model=EntityOut, status_code=201)
@@ -526,10 +547,28 @@ async def delete_transcript(transcript_id: int, db: AsyncSession = Depends(get_d
 
 @app.get("/api/games/{game_id}/loot", response_model=list[LootOut])
 async def list_loot(game_id: int, db: AsyncSession = Depends(get_db)):
+    from foundry_bridge.models import notes_loot_table
     result = await db.execute(
         sa.select(Loot).where(Loot.game_id == game_id).order_by(Loot.created_at.asc())
     )
-    return result.scalars().all()
+    items = list(result.scalars().all())
+    if not items:
+        return []
+    assoc = await db.execute(
+        sa.select(notes_loot_table.c.loot_id, notes_loot_table.c.note_id)
+        .where(notes_loot_table.c.loot_id.in_([i.id for i in items]))
+    )
+    note_ids_by_loot: dict[int, list[int]] = {}
+    for loot_id, note_id in assoc.all():
+        note_ids_by_loot.setdefault(loot_id, []).append(note_id)
+    return [
+        LootOut(
+            id=i.id, game_id=i.game_id, item_name=i.item_name, acquired_by=i.acquired_by,
+            quest_id=i.quest_id, created_at=i.created_at,
+            note_ids=note_ids_by_loot.get(i.id, []),
+        )
+        for i in items
+    ]
 
 
 @app.post("/api/games/{game_id}/loot", response_model=LootOut, status_code=201)
@@ -667,10 +706,27 @@ async def delete_decision(decision_id: int, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/games/{game_id}/events", response_model=list[EventOut])
 async def list_events(game_id: int, db: AsyncSession = Depends(get_db)):
+    from foundry_bridge.models import notes_events_table
     result = await db.execute(
         sa.select(Event).where(Event.game_id == game_id).order_by(Event.created_at.asc())
     )
-    return result.scalars().all()
+    events = list(result.scalars().all())
+    if not events:
+        return []
+    assoc = await db.execute(
+        sa.select(notes_events_table.c.event_id, notes_events_table.c.note_id)
+        .where(notes_events_table.c.event_id.in_([e.id for e in events]))
+    )
+    note_ids_by_event: dict[int, list[int]] = {}
+    for event_id, note_id in assoc.all():
+        note_ids_by_event.setdefault(event_id, []).append(note_id)
+    return [
+        EventOut(
+            id=e.id, game_id=e.game_id, text=e.text, created_at=e.created_at,
+            note_ids=note_ids_by_event.get(e.id, []),
+        )
+        for e in events
+    ]
 
 
 @app.post("/api/games/{game_id}/events", response_model=EventOut, status_code=201)

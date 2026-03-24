@@ -22,6 +22,7 @@ export interface Entity {
   entity_type: 'npc' | 'location' | 'item' | 'faction' | 'other';
   name: string;
   description: string;
+  note_ids: number[];
   created_at: string;
   updated_at: string;
 }
@@ -58,6 +59,7 @@ export interface Loot {
   item_name: string;
   acquired_by: string;
   quest_id: number | null;
+  note_ids: number[];
   created_at: string;
 }
 
@@ -94,6 +96,7 @@ export interface Event {
   id: number;
   game_id: number;
   text: string;
+  note_ids: number[];
   created_at: string;
 }
 

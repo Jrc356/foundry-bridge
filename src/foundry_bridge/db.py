@@ -26,6 +26,7 @@ from foundry_bridge.models import (
     QuestDescriptionHistory,
     Thread,
     Transcript,
+    notes_entities_table,
     notes_events_table,
     notes_loot_table,
 )
@@ -307,6 +308,11 @@ async def write_note_pipeline_result(
                 entity_id = entity_result.scalar()
                 if entity_id is not None:
                     inserted_entity_ids.append(entity_id)
+                    await session.execute(
+                        pg_insert(notes_entities_table)
+                        .values(note_id=note_id, entity_id=entity_id)
+                        .on_conflict_do_nothing()
+                    )
 
             # 3. Resolve quest giver entity names to IDs
             # If a quest references a giver by name (quest_giver_entity_name) but not by ID,

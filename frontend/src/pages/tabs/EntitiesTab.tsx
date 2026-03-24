@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, PlusCircle, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
-import { createEntity, deleteEntity, getEntities, updateEntity } from '../../api'
+import { createEntity, deleteEntity, getEntities, getNotes, updateEntity } from '../../api'
+import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
-import type { Entity } from '../../types'
+import type { Entity, Note } from '../../types'
 
 const ENTITY_TYPES = ['npc', 'location', 'item', 'faction', 'other'] as const
 
@@ -27,6 +28,7 @@ export default function EntitiesTab({ gameId }: { gameId: number }) {
     queryKey: ['entities', gameId, filter === 'all' ? undefined : filter],
     queryFn: () => getEntities(gameId, filter === 'all' ? undefined : filter),
   })
+  const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const createMut = useMutation({
     mutationFn: () => createEntity(gameId, new_),
@@ -132,6 +134,7 @@ export default function EntitiesTab({ gameId }: { gameId: number }) {
                       <span className={`text-xs px-2 py-0.5 rounded-full capitalize ${TYPE_COLORS[entity.entity_type]}`}>{entity.entity_type}</span>
                     </div>
                     <p className="text-sm text-gray-400 leading-relaxed">{entity.description}</p>
+                    <NotesBadge notes={(notes as Note[]).filter(n => entity.note_ids.includes(n.id))} />
                   </div>
                   <button onClick={() => confirm(`Delete ${entity.name}?`) && deleteMut.mutate(entity.id)}
                     className="text-gray-600 hover:text-red-400 transition-colors shrink-0"><Trash2 size={14} /></button>

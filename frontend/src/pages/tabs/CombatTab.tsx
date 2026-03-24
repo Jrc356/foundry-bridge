@@ -1,12 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2 } from 'lucide-react'
-import { deleteCombat, getCombat } from '../../api'
+import { deleteCombat, getCombat, getNotes } from '../../api'
+import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
-import type { CombatUpdate } from '../../types'
+import type { CombatUpdate, Note } from '../../types'
 
 export default function CombatTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: combat = [], isLoading } = useQuery({ queryKey: ['combat', gameId], queryFn: () => getCombat(gameId) })
+  const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const deleteMut = useMutation({
     mutationFn: deleteCombat,
@@ -29,6 +31,7 @@ export default function CombatTab({ gameId }: { gameId: number }) {
                 <p className="font-medium text-red-300">{c.encounter}</p>
                 <p className="text-sm text-gray-400 mt-1">{c.outcome}</p>
                 <p className="text-xs text-gray-600 mt-2">{new Date(c.created_at).toLocaleDateString()}</p>
+                <NotesBadge notes={(notes as Note[]).filter(n => n.id === c.note_id)} />
               </div>
               <button onClick={() => confirm('Delete combat record?') && deleteMut.mutate(c.id)}
                 className="text-gray-600 hover:text-red-400 transition-colors shrink-0"><Trash2 size={14} /></button>

@@ -1,15 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PlusCircle, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { createLoot, deleteLoot, getLoot, getQuests, updateLoot } from '../../api'
+import { createLoot, deleteLoot, getLoot, getNotes, getQuests, updateLoot } from '../../api'
+import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
-import type { Loot, Quest } from '../../types'
+import type { Loot, Note, Quest } from '../../types'
 
 export default function LootTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: loot = [], isLoading } = useQuery({ queryKey: ['loot', gameId], queryFn: () => getLoot(gameId) })
   const { data: quests = [] } = useQuery({ queryKey: ['quests', gameId], queryFn: () => getQuests(gameId) })
   const questMap = new Map((quests as Quest[]).map(q => [q.id, q]))
+  const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ item_name: '', acquired_by: '' })
   const [linkingQuestFor, setLinkingQuestFor] = useState<number | null>(null)
@@ -82,7 +84,10 @@ export default function LootTab({ gameId }: { gameId: number }) {
             <tbody className="divide-y divide-gray-800">
               {loot.map((item: Loot) => (
                 <tr key={item.id} className="hover:bg-gray-800/50">
-                  <td className="px-4 py-3 text-amber-300 font-medium">{item.item_name}</td>
+                  <td className="px-4 py-3 text-amber-300 font-medium">
+                    {item.item_name}
+                    <NotesBadge notes={(notes as Note[]).filter(n => item.note_ids.includes(n.id))} />
+                  </td>
                   <td className="px-4 py-3 text-gray-300">{item.acquired_by}</td>
                   <td className="px-4 py-3">
                     {linkingQuestFor === item.id ? (

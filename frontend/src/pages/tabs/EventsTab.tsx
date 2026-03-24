@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PlusCircle, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { createEvent, deleteEvent, getEvents } from '../../api'
+import { createEvent, deleteEvent, getEvents, getNotes } from '../../api'
+import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
-import type { Event } from '../../types'
+import type { Event, Note } from '../../types'
 
 export default function EventsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: events = [], isLoading } = useQuery({ queryKey: ['events', gameId], queryFn: () => getEvents(gameId) })
+  const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
   const [showAdd, setShowAdd] = useState(false)
   const [text, setText] = useState('')
 
@@ -61,6 +63,7 @@ export default function EventsTab({ gameId }: { gameId: number }) {
               <div>
                 <p className="text-sm text-gray-200">{event.text}</p>
                 <p className="text-xs text-gray-500 mt-1">{new Date(event.created_at).toLocaleDateString()}</p>
+                <NotesBadge notes={(notes as Note[]).filter(n => event.note_ids.includes(n.id))} />
               </div>
               <button onClick={() => confirm('Delete event?') && deleteMut.mutate(event.id)}
                 className="text-gray-600 hover:text-red-400 transition-colors shrink-0"><Trash2 size={13} /></button>

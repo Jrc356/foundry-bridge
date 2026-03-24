@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle, Circle, PlusCircle, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { createThread, deleteThread, getQuests, getThreads, updateThread } from '../../api'
+import { createThread, deleteThread, getNotes, getQuests, getThreads, updateThread } from '../../api'
+import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
-import type { Quest, Thread } from '../../types'
+import type { Note, Quest, Thread } from '../../types'
 
 export default function ThreadsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
@@ -25,6 +26,7 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
     queryFn: () => getQuests(gameId),
   })
   const questMap = new Map((quests as Quest[]).map(q => [q.id, q]))
+  const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const createMut = useMutation({
     mutationFn: () => createThread(gameId, newText),
@@ -125,6 +127,9 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
                       <p className={`text-sm leading-relaxed ${thread.is_resolved ? 'text-gray-500 line-through' : 'text-gray-200'}`}>{thread.text}</p>
                       {thread.is_resolved && thread.resolution && (
                         <p className="text-xs text-green-600 mt-1 italic">Resolved: {thread.resolution}</p>
+                      )}
+                      {thread.resolved_by_note_id != null && (
+                        <NotesBadge notes={(notes as Note[]).filter(n => n.id === thread.resolved_by_note_id)} />
                       )}
                       {thread.quest_id != null && (
                         <span className="inline-flex items-center gap-1 mt-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-900 text-amber-200 border border-amber-700">

@@ -3,7 +3,8 @@ import { PlusCircle, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { createDecision, deleteDecision, getDecisions, getNotes } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
-import type { Decision } from '../../types'
+import { NotesBadge } from '../../components/NotesBadge'
+import type { Decision, Note } from '../../types'
 
 export default function DecisionsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
@@ -78,7 +79,10 @@ export default function DecisionsTab({ gameId }: { gameId: number }) {
             <tbody className="divide-y divide-gray-800">
               {decisions.map((d: Decision) => (
                 <tr key={d.id} className="hover:bg-gray-800/50">
-                  <td className="px-4 py-3 text-gray-200">{d.decision}</td>
+                  <td className="px-4 py-3 text-gray-200">
+                    {d.decision}
+                    <NotesBadge notes={(notes as Note[]).filter(n => n.id === d.note_id)} />
+                  </td>
                   <td className="px-4 py-3 text-purple-300">{d.made_by}</td>
                   <td className="px-4 py-3 text-gray-500 text-xs">{new Date(d.created_at).toLocaleDateString()}</td>
                   <td className="px-4 py-3">
