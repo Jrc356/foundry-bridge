@@ -127,6 +127,7 @@ class ThreadOut(BaseModel):
     resolved_at: Optional[datetime]
     resolution: Optional[str]
     resolved_by_note_id: Optional[int]
+    opened_by_note_id: Optional[int]
     quest_id: Optional[int]
     created_at: datetime
 

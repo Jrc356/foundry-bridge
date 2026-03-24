@@ -124,6 +124,7 @@ class Thread(Base):
     )
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by_note_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("notes.id"), nullable=True)
+    opened_by_note_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("notes.id"), nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     quest_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("quests.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

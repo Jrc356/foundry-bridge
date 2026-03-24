@@ -35,6 +35,7 @@ export interface Thread {
   resolved_at: string | null;
   resolution: string | null;
   resolved_by_note_id: number | null;
+  opened_by_note_id: number | null;
   quest_id: number | null;
   created_at: string;
 }

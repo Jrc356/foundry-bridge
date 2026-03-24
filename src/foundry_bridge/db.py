@@ -462,7 +462,7 @@ async def write_note_pipeline_result(
                             "game %d: thread references unknown quest_id=%d; nullifying",
                             game_id, raw_quest_id,
                         )
-                new_thread = Thread(game_id=game_id, text=text, quest_id=safe_quest_id)
+                new_thread = Thread(game_id=game_id, text=text, quest_id=safe_quest_id, opened_by_note_id=note_id)
                 session.add(new_thread)
                 await session.flush()
                 inserted_thread_ids.append(new_thread.id)

@@ -128,7 +128,10 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
                       {thread.is_resolved && thread.resolution && (
                         <p className="text-xs text-green-600 mt-1 italic">Resolved: {thread.resolution}</p>
                       )}
-                      {thread.resolved_by_note_id != null && (
+                      {thread.opened_by_note_id != null && (
+                        <NotesBadge notes={(notes as Note[]).filter(n => n.id === thread.opened_by_note_id)} />
+                      )}
+                      {thread.resolved_by_note_id != null && thread.resolved_by_note_id !== thread.opened_by_note_id && (
                         <NotesBadge notes={(notes as Note[]).filter(n => n.id === thread.resolved_by_note_id)} />
                       )}
                       {thread.quest_id != null && (
