@@ -150,6 +150,13 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
       return next
     })
 
+  const toggleExpandedNote = (noteId: number) =>
+    setExpandedNotes(prev => {
+      const next = new Set(prev)
+      next.has(noteId) ? next.delete(noteId) : next.add(noteId)
+      return next
+    })
+
   const startEdit = (q: Quest) => {
     setEditing(q.id)
     setEditValues({ name: q.name, description: q.description, quest_giver_entity_id: q.quest_giver_entity_id })
@@ -467,7 +474,17 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                                 {questNotesFor(quest.note_ids).map(n => (
                                   <li key={n.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2">
                                     <time className="text-gray-500 block mb-0.5">{new Date(n.created_at).toLocaleDateString()}</time>
-                                    <p className="text-gray-300">{n.summary.length > 120 ? n.summary.slice(0, 120) + '…' : n.summary}</p>
+                                    <p className="text-gray-300 mb-1">
+                                      {expandedNotes.has(n.id) ? n.summary : n.summary.length > 120 ? n.summary.slice(0, 120) + '…' : n.summary}
+                                    </p>
+                                    {n.summary.length > 120 && (
+                                      <button
+                                        onClick={() => toggleExpandedNote(n.id)}
+                                        className="text-xs text-amber-600 hover:text-amber-400 font-medium transition-colors"
+                                      >
+                                        {expandedNotes.has(n.id) ? 'show less' : 'show more'}
+                                      </button>
+                                    )}
                                   </li>
                                 ))}
                               </ul>
