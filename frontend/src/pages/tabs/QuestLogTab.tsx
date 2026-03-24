@@ -433,29 +433,6 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                                   ))}
                                 </ul>
                               )}
-                              {unlinkedOpenThreads().length > 0 && (
-                                <div>
-                                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                                    Link a Thread
-                                  </p>
-                                  <select
-                                    defaultValue=""
-                                    onChange={e => {
-                                      const tid = Number(e.target.value)
-                                      if (tid) linkThreadMut.mutate({ threadId: tid, questId: quest.id })
-                                      e.currentTarget.value = ''
-                                    }}
-                                    className="bg-gray-900 border border-gray-600 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-amber-500 w-full"
-                                  >
-                                    <option value="" disabled>— select a thread to link —</option>
-                                    {unlinkedOpenThreads().map(t => (
-                                      <option key={t.id} value={t.id}>
-                                        {t.text.length > 80 ? t.text.slice(0, 80) + '…' : t.text}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              )}
                             </div>
                           )}
                         </div>
