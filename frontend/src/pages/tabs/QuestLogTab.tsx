@@ -171,9 +171,6 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
   const questLoot = (questId: number): Loot[] =>
     (loot as Loot[]).filter(l => l.quest_id === questId)
 
-  const unlinkedOpenThreads = (): Thread[] =>
-    (threads as Thread[]).filter(t => !t.is_resolved && t.quest_id == null)
-
   if (isLoading) return <div className="p-6 text-gray-400">Loading…</div>
 
   const activeQuests = quests.filter(q => q.status === 'active')
