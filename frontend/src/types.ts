@@ -17,16 +17,19 @@ export interface Note {
   is_audit: boolean;
 }
 
-export type FlagType =
-  | 'entity_duplicate'
-  | 'missing_entity'
-  | 'missing_event'
-  | 'missing_decision'
-  | 'missing_loot'
-  | 'loot_correction'
-  | 'decision_correction'
-  | 'deletion_candidate'
-  | 'other';
+export type AuditOperation = 'create' | 'update' | 'delete' | 'merge';
+
+export type AuditTableName =
+  | 'entities'
+  | 'quests'
+  | 'threads'
+  | 'events'
+  | 'decisions'
+  | 'loot'
+  | 'important_quotes'
+  | 'combat_updates';
+
+export type Confidence = 'low' | 'medium' | 'high';
 
 export type FlagStatus = 'pending' | 'applied' | 'dismissed';
 
@@ -51,10 +54,36 @@ export type ReasonCode =
   | 'noop_same_entity'
   | 'already_deleted'
   | 'unsupported_table'
-  | 'unsupported_flag_type'
+  | 'unsupported_operation'
   | 'already_active'
   | 'restored'
   | 'conflict_audit_note';
+
+export type DiffPayload =
+  | {
+      operation: 'create';
+      data: Record<string, unknown>;
+      _before: null;
+      _after: Record<string, unknown> | null;
+    }
+  | {
+      operation: 'update';
+      changes: Record<string, unknown>;
+      _before: Record<string, unknown>;
+      _after: Record<string, unknown>;
+    }
+  | {
+      operation: 'delete';
+      _before: Record<string, unknown>;
+      _after: null;
+    }
+  | {
+      operation: 'merge';
+      canonical_id: number;
+      duplicate_id: number;
+      _canonical: Record<string, unknown>;
+      _duplicate: Record<string, unknown>;
+    };
 
 export interface AuditRun {
   id: number;
@@ -75,11 +104,12 @@ export interface AuditFlag {
   id: number;
   game_id: number;
   audit_run_id: number;
-  flag_type: FlagType;
-  target_type: string | null;
+  operation: AuditOperation;
+  table_name: AuditTableName;
+  confidence: Confidence;
   target_id: number | null;
   description: string;
-  suggested_change: Record<string, unknown>;
+  suggested_change: DiffPayload;
   status: FlagStatus;
   created_at: string;
   resolved_at: string | null;

@@ -303,8 +303,9 @@ class AuditFlag(Base):
     audit_run_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("audit_runs.id"), nullable=False
     )
-    flag_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    target_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    operation: Mapped[str] = mapped_column(String(10), nullable=False)
+    table_name: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(10), nullable=False)
     target_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     suggested_change: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -317,6 +318,18 @@ class AuditFlag(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
+        sa.CheckConstraint(
+            "operation IN ('create', 'update', 'delete', 'merge')",
+            name="ck_audit_flags_operation",
+        ),
+        sa.CheckConstraint(
+            "table_name IN ('entities', 'quests', 'threads', 'events', 'decisions', 'loot', 'important_quotes', 'combat_updates')",
+            name="ck_audit_flags_table_name",
+        ),
+        sa.CheckConstraint(
+            "confidence IN ('low', 'medium', 'high')",
+            name="ck_audit_flags_confidence",
+        ),
         sa.CheckConstraint(
             "status IN ('pending', 'applied', 'dismissed')",
             name="ck_audit_flags_status",

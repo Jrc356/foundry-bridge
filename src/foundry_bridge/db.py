@@ -3,7 +3,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from fastembed import TextEmbedding
@@ -671,6 +671,15 @@ class AuditFlagMutationResult:
     details: dict[str, Any]
 
 
+class FlagApplyResult(NamedTuple):
+    ok: bool
+    noop: bool
+    reason_code: str
+    message: str
+    details: dict[str, Any]
+    embed_ids: dict[str, list[int]]
+
+
 def _model_to_dict(obj: Any) -> dict[str, Any]:
     if isinstance(obj, dict):
         return obj
@@ -714,238 +723,1708 @@ def _affected_rows(result: Any) -> int:
     return int(rowcount or 0)
 
 
+def _canonicalize_audit_table_name(raw_table_name: Any) -> Optional[str]:
+    if not isinstance(raw_table_name, str):
+        return None
+
+    table_aliases = {
+        "quest": "quests",
+        "quests": "quests",
+        "thread": "threads",
+        "threads": "threads",
+        "entity": "entities",
+        "entities": "entities",
+        "event": "events",
+        "events": "events",
+        "loot": "loot",
+        "loots": "loot",
+        "decision": "decisions",
+        "decisions": "decisions",
+        "quote": "important_quotes",
+        "quotes": "important_quotes",
+        "important_quote": "important_quotes",
+        "important_quotes": "important_quotes",
+        "combat_update": "combat_updates",
+        "combat_updates": "combat_updates",
+    }
+    canonical = table_aliases.get(raw_table_name.strip().lower())
+    if canonical is None:
+        return None
+    return canonical
+
+
 async def _apply_flag_change(
     session,
     flag: AuditFlag,
-) -> tuple[bool, bool, str, str, dict[str, Any]]:
-    change = flag.suggested_change or {}
+) -> FlagApplyResult:
+    supported_operations = {"create", "update", "delete", "merge"}
+    supported_tables = {
+        "entities",
+        "quests",
+        "threads",
+        "events",
+        "decisions",
+        "loot",
+        "important_quotes",
+        "combat_updates",
+    }
+    embeddable_tables = {
+        "entities",
+        "quests",
+        "threads",
+        "events",
+        "decisions",
+        "loot",
+        "combat_updates",
+    }
+    confidence_values = {"low", "medium", "high"}
+    allowed_entity_types = {member.value for member in EntityType}
 
-    if flag.flag_type == "entity_duplicate":
-        canonical_id = change.get("canonical_id")
-        duplicate_id = change.get("duplicate_id")
-        if not isinstance(canonical_id, int) or not isinstance(duplicate_id, int):
-            return False, False, "invalid_shape", "entity_duplicate requires canonical_id and duplicate_id", {}
-        if canonical_id == duplicate_id:
-            return True, True, "noop_same_entity", "entity_duplicate points to identical IDs", {
-                "canonical_id": canonical_id,
-                "duplicate_id": duplicate_id,
-            }
+    embed_ids_by_table: dict[str, set[int]] = {table_name: set() for table_name in embeddable_tables}
 
-        canonical = await session.get(Entity, canonical_id)
-        duplicate = await session.get(Entity, duplicate_id)
-        if canonical is None or duplicate is None:
-            return False, False, "not_found", "Canonical or duplicate entity not found", {
-                "canonical_id": canonical_id,
-                "duplicate_id": duplicate_id,
-            }
-        if canonical.game_id != flag.game_id or duplicate.game_id != flag.game_id:
-            return False, False, "cross_game", "Entities do not belong to audit flag game", {
-                "canonical_game_id": canonical.game_id,
-                "duplicate_game_id": duplicate.game_id,
-                "flag_game_id": flag.game_id,
-            }
-
-        duplicate_note_rows = await session.execute(
-            sa.select(notes_entities_table.c.note_id).where(
-                notes_entities_table.c.entity_id == duplicate_id
-            )
-        )
-        duplicate_note_ids = [row[0] for row in duplicate_note_rows.all()]
-        for note_id in duplicate_note_ids:
-            await session.execute(
-                pg_insert(notes_entities_table)
-                .values(note_id=note_id, entity_id=canonical_id)
-                .on_conflict_do_nothing()
-            )
-
-        await session.execute(
-            sa.update(Quest)
-            .where(Quest.game_id == flag.game_id, Quest.quest_giver_entity_id == duplicate_id)
-            .values(quest_giver_entity_id=canonical_id, updated_at=sa.func.now())
-        )
-        await session.execute(
-            sa.delete(notes_entities_table).where(notes_entities_table.c.entity_id == duplicate_id)
-        )
-        await session.execute(
-            sa.delete(Entity).where(Entity.id == duplicate_id, Entity.game_id == flag.game_id)
-        )
-        return True, False, "applied", "Merged duplicate entity into canonical entity", {
-            "canonical_id": canonical_id,
-            "duplicate_id": duplicate_id,
+    def _final_embed_ids() -> dict[str, list[int]]:
+        return {
+            table_name: sorted(record_ids)
+            for table_name, record_ids in embed_ids_by_table.items()
+            if record_ids
         }
 
-    if flag.flag_type == "missing_entity":
-        name = change.get("name")
-        entity_type = change.get("entity_type")
-        description = change.get("description")
-        if not isinstance(name, str) or not isinstance(entity_type, str) or not isinstance(description, str):
-            return False, False, "invalid_shape", "missing_entity requires name/entity_type/description", {}
+    def _add_embed_id(table_name: str, record_id: int) -> None:
+        if table_name in embeddable_tables:
+            embed_ids_by_table[table_name].add(record_id)
 
-        entity_insert_stmt = pg_insert(Entity).values(
-            game_id=flag.game_id,
-            entity_type=entity_type,
-            name=name,
-            description=description,
+    def _result(
+        *,
+        ok: bool,
+        noop: bool,
+        reason_code: str,
+        message: str,
+        details: Optional[dict[str, Any]] = None,
+    ) -> FlagApplyResult:
+        return FlagApplyResult(
+            ok=ok,
+            noop=noop,
+            reason_code=reason_code,
+            message=message,
+            details=details or {},
+            embed_ids=_final_embed_ids(),
         )
-        entity_upsert_stmt = entity_insert_stmt.on_conflict_do_update(
-            constraint="uq_entities_game_entity_type_name",
-            set_={
-                "description": entity_insert_stmt.excluded.description,
-                "updated_at": sa.func.now(),
-            },
-        ).returning(Entity.id)
-        entity_result = await session.execute(entity_upsert_stmt)
-        entity_id = entity_result.scalar_one()
 
-        audit_note_id_result = await session.execute(
+    async def _resolve_entity_id(*, raw_entity_id: Any, raw_entity_name: Any) -> Optional[int]:
+        if isinstance(raw_entity_id, int):
+            existing = await session.execute(
+                sa.select(Entity.id).where(Entity.id == raw_entity_id, Entity.game_id == flag.game_id)
+            )
+            if existing.scalar_one_or_none() is not None:
+                return raw_entity_id
+            return None
+
+        if raw_entity_id is None and isinstance(raw_entity_name, str) and raw_entity_name.strip():
+            existing = await session.execute(
+                sa.select(Entity.id)
+                .where(
+                    Entity.game_id == flag.game_id,
+                    Entity.name == raw_entity_name.strip(),
+                )
+                .limit(1)
+            )
+            return existing.scalar_one_or_none()
+        return None
+
+    async def _resolve_quest_id(*, raw_quest_id: Any, raw_quest_name: Any) -> Optional[int]:
+        if isinstance(raw_quest_id, int):
+            existing = await session.execute(
+                sa.select(Quest.id).where(
+                    Quest.id == raw_quest_id,
+                    Quest.game_id == flag.game_id,
+                    Quest.is_deleted == False,  # noqa: E712
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                return raw_quest_id
+            return None
+
+        if raw_quest_id is None and isinstance(raw_quest_name, str) and raw_quest_name.strip():
+            existing = await session.execute(
+                sa.select(Quest.id)
+                .where(
+                    Quest.game_id == flag.game_id,
+                    Quest.name == raw_quest_name.strip(),
+                    Quest.is_deleted == False,  # noqa: E712
+                )
+                .limit(1)
+            )
+            return existing.scalar_one_or_none()
+        return None
+
+    async def _load_audit_note_id() -> Optional[int]:
+        note_result = await session.execute(
             sa.select(AuditRun.audit_note_id).where(AuditRun.id == flag.audit_run_id)
         )
-        audit_note_id = audit_note_id_result.scalar_one_or_none()
-        if audit_note_id is not None:
+        return note_result.scalar_one_or_none()
+
+    def _target_id_from_flag_or_change(change: dict[str, Any]) -> Optional[int]:
+        if isinstance(flag.target_id, int):
+            return flag.target_id
+        raw_id = change.get("id")
+        if isinstance(raw_id, int):
+            return raw_id
+        return None
+
+    async def _row_game_id(model_cls: Any, row_id: int) -> Optional[int]:
+        game_result = await session.execute(sa.select(model_cls.game_id).where(model_cls.id == row_id))
+        return game_result.scalar_one_or_none()
+
+    operation = flag.operation.strip().lower() if isinstance(flag.operation, str) else ""
+    table_name = _canonicalize_audit_table_name(flag.table_name)
+    confidence = flag.confidence.strip().lower() if isinstance(flag.confidence, str) else ""
+    if (
+        operation not in supported_operations
+        or table_name not in supported_tables
+        or confidence not in confidence_values
+    ):
+        return _result(
+            ok=False,
+            noop=False,
+            reason_code="unsupported_operation",
+            message="Unsupported operation/table_name/confidence combination",
+            details={
+                "operation": flag.operation,
+                "table_name": flag.table_name,
+                "confidence": flag.confidence,
+            },
+        )
+
+    change = flag.suggested_change if isinstance(flag.suggested_change, dict) else {}
+    data_payload = change.get("data") if isinstance(change.get("data"), dict) else change
+
+    if operation == "create":
+        if not isinstance(data_payload, dict):
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="invalid_shape",
+                message="Create operation requires suggested_change.data dict payload",
+            )
+
+        audit_note_id = await _load_audit_note_id()
+        if not isinstance(audit_note_id, int):
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="invalid_state",
+                message="Audit run is missing audit_note_id",
+                details={"audit_run_id": flag.audit_run_id},
+            )
+
+        if table_name == "entities":
+            raw_name = data_payload.get("name")
+            raw_entity_type = data_payload.get("entity_type")
+            raw_description = data_payload.get("description")
+            if (
+                not isinstance(raw_name, str)
+                or not raw_name.strip()
+                or not isinstance(raw_entity_type, str)
+                or not isinstance(raw_description, str)
+            ):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Entity create requires name/entity_type/description",
+                )
+
+            name = raw_name.strip()
+            entity_type = raw_entity_type.strip().lower()
+            if entity_type not in allowed_entity_types:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Entity create has invalid entity_type",
+                    details={"entity_type": raw_entity_type},
+                )
+
+            entity_insert_stmt = pg_insert(Entity).values(
+                game_id=flag.game_id,
+                entity_type=entity_type,
+                name=name,
+                description=raw_description,
+            )
+            entity_upsert_stmt = entity_insert_stmt.on_conflict_do_update(
+                constraint="uq_entities_game_entity_type_name",
+                set_={
+                    "description": entity_insert_stmt.excluded.description,
+                    "updated_at": sa.func.now(),
+                },
+            ).returning(Entity.id)
+            entity_id = (await session.execute(entity_upsert_stmt)).scalar_one()
+
             await session.execute(
                 pg_insert(notes_entities_table)
                 .values(note_id=audit_note_id, entity_id=entity_id)
                 .on_conflict_do_nothing()
             )
-
-        return True, False, "applied", "Missing entity inserted/upserted", {
-            "entity_id": entity_id,
-            "linked_audit_note_id": audit_note_id,
-        }
-
-    if flag.flag_type == "deletion_candidate":
-        table_name = change.get("table")
-        record_id = change.get("record_id")
-        reason = change.get("reason") or "audit flag deletion candidate"
-        if not isinstance(table_name, str) or not isinstance(record_id, int):
-            return False, False, "invalid_shape", "deletion_candidate requires table and record_id", {}
-
-        table_aliases = {
-            "quest": "quests",
-            "quests": "quests",
-            "thread": "threads",
-            "threads": "threads",
-            "entity": "entities",
-            "entities": "entities",
-            "event": "events",
-            "events": "events",
-            "loot": "loot",
-            "loots": "loot",
-            "decision": "decisions",
-            "decisions": "decisions",
-            "quote": "important_quotes",
-            "quotes": "important_quotes",
-            "important_quote": "important_quotes",
-            "important_quotes": "important_quotes",
-        }
-        table_name = table_aliases.get(table_name.strip().lower(), table_name)
+            _add_embed_id("entities", entity_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Entity created/upserted",
+                details={"id": entity_id},
+            )
 
         if table_name == "quests":
-            quest = await session.get(Quest, record_id)
-            if quest is None or quest.game_id != flag.game_id:
-                return False, False, "not_found", "Quest deletion candidate not found", {"record_id": record_id}
-            if quest.is_deleted:
-                return True, True, "already_deleted", "Quest already soft-deleted", {"record_id": record_id}
+            raw_name = data_payload.get("name")
+            raw_description = data_payload.get("description")
+            raw_status = data_payload.get("status", "active")
+            if (
+                not isinstance(raw_name, str)
+                or not raw_name.strip()
+                or not isinstance(raw_description, str)
+                or not isinstance(raw_status, str)
+            ):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Quest create requires name/description/status",
+                )
+
+            status = raw_status.strip().lower()
+            if status not in {"active", "completed"}:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Quest create has invalid status",
+                    details={"status": raw_status},
+                )
+
+            quest_giver_entity_id = await _resolve_entity_id(
+                raw_entity_id=data_payload.get("quest_giver_entity_id"),
+                raw_entity_name=data_payload.get("entity_name") or data_payload.get("quest_giver_entity_name"),
+            )
+
+            quest_insert_stmt = pg_insert(Quest).values(
+                game_id=flag.game_id,
+                name=raw_name.strip(),
+                description=raw_description,
+                status=status,
+                quest_giver_entity_id=quest_giver_entity_id,
+                note_ids=[audit_note_id],
+                is_deleted=False,
+                deleted_at=None,
+                deleted_reason=None,
+            )
+            quest_upsert_stmt = quest_insert_stmt.on_conflict_do_update(
+                constraint="uq_quests_game_name",
+                set_={
+                    "description": quest_insert_stmt.excluded.description,
+                    "status": quest_insert_stmt.excluded.status,
+                    "quest_giver_entity_id": sa.func.coalesce(
+                        quest_insert_stmt.excluded.quest_giver_entity_id,
+                        Quest.quest_giver_entity_id,
+                    ),
+                    "note_ids": sa.func.array_append(Quest.note_ids, audit_note_id),
+                    "updated_at": sa.func.now(),
+                    "is_deleted": False,
+                    "deleted_at": None,
+                    "deleted_reason": None,
+                },
+            ).returning(Quest.id)
+            quest_id = (await session.execute(quest_upsert_stmt)).scalar_one()
+            _add_embed_id("quests", quest_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Quest created/upserted",
+                details={"id": quest_id},
+            )
+
+        if table_name == "loot":
+            raw_item_name = data_payload.get("item_name")
+            raw_acquired_by = data_payload.get("acquired_by")
+            if (
+                not isinstance(raw_item_name, str)
+                or not raw_item_name.strip()
+                or not isinstance(raw_acquired_by, str)
+                or not raw_acquired_by.strip()
+            ):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Loot create requires item_name/acquired_by",
+                )
+
+            quest_id = await _resolve_quest_id(
+                raw_quest_id=data_payload.get("quest_id"),
+                raw_quest_name=data_payload.get("quest_name"),
+            )
+            loot_insert_stmt = pg_insert(Loot).values(
+                game_id=flag.game_id,
+                item_name=raw_item_name.strip(),
+                acquired_by=raw_acquired_by.strip(),
+                quest_id=quest_id,
+            )
+            loot_upsert_stmt = loot_insert_stmt.on_conflict_do_update(
+                constraint="uq_loot_game_item_acquirer",
+                set_={
+                    "quest_id": sa.func.coalesce(
+                        loot_insert_stmt.excluded.quest_id,
+                        Loot.quest_id,
+                    ),
+                },
+            ).returning(Loot.id)
+            loot_id = (await session.execute(loot_upsert_stmt)).scalar_one()
+            await session.execute(
+                pg_insert(notes_loot_table)
+                .values(note_id=audit_note_id, loot_id=loot_id)
+                .on_conflict_do_nothing()
+            )
+            _add_embed_id("loot", loot_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Loot created/upserted",
+                details={"id": loot_id},
+            )
+
+        if table_name == "events":
+            raw_text = data_payload.get("text")
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Event create requires text",
+                )
+
+            event_insert_stmt = pg_insert(Event).values(
+                game_id=flag.game_id,
+                text=raw_text.strip(),
+            )
+            event_upsert_stmt = event_insert_stmt.on_conflict_do_update(
+                constraint="uq_events_game_text",
+                set_={"text": event_insert_stmt.excluded.text},
+            ).returning(Event.id)
+            event_id = (await session.execute(event_upsert_stmt)).scalar_one()
+
+            await session.execute(
+                pg_insert(notes_events_table)
+                .values(note_id=audit_note_id, event_id=event_id)
+                .on_conflict_do_nothing()
+            )
+            _add_embed_id("events", event_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Event created/upserted",
+                details={"id": event_id},
+            )
+
+        if table_name == "threads":
+            raw_text = data_payload.get("text")
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Thread create requires text",
+                )
+
+            quest_id = await _resolve_quest_id(
+                raw_quest_id=data_payload.get("quest_id"),
+                raw_quest_name=data_payload.get("quest_name"),
+            )
+            thread = Thread(
+                game_id=flag.game_id,
+                text=raw_text,
+                quest_id=quest_id,
+                opened_by_note_id=audit_note_id,
+            )
+            session.add(thread)
+            await session.flush()
+            if not isinstance(thread.id, int):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_state",
+                    message="Thread insert did not return id",
+                )
+            _add_embed_id("threads", thread.id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Thread created",
+                details={"id": thread.id},
+            )
+
+        if table_name == "decisions":
+            raw_decision = data_payload.get("decision")
+            raw_made_by = data_payload.get("made_by")
+            if not isinstance(raw_decision, str) or not isinstance(raw_made_by, str):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Decision create requires decision/made_by",
+                )
+
+            decision = Decision(
+                game_id=flag.game_id,
+                note_id=audit_note_id,
+                decision=raw_decision,
+                made_by=raw_made_by,
+            )
+            session.add(decision)
+            await session.flush()
+            if not isinstance(decision.id, int):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_state",
+                    message="Decision insert did not return id",
+                )
+            _add_embed_id("decisions", decision.id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Decision created",
+                details={"id": decision.id},
+            )
+
+        if table_name == "important_quotes":
+            raw_text = data_payload.get("text")
+            raw_speaker = data_payload.get("speaker")
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Important quote create requires text",
+                )
+            if raw_speaker is not None and not isinstance(raw_speaker, str):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Important quote speaker must be string or null",
+                )
+
+            transcript_id: Optional[int] = None
+            raw_transcript_id = data_payload.get("transcript_id")
+            if isinstance(raw_transcript_id, int):
+                transcript_exists = await session.execute(
+                    sa.select(Transcript.id).where(
+                        Transcript.id == raw_transcript_id,
+                        Transcript.game_id == flag.game_id,
+                    )
+                )
+                if transcript_exists.scalar_one_or_none() is not None:
+                    transcript_id = raw_transcript_id
+
+            quote = ImportantQuote(
+                game_id=flag.game_id,
+                note_id=audit_note_id,
+                transcript_id=transcript_id,
+                text=raw_text,
+                speaker=raw_speaker,
+            )
+            session.add(quote)
+            await session.flush()
+            if not isinstance(quote.id, int):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_state",
+                    message="Important quote insert did not return id",
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Important quote created",
+                details={"id": quote.id},
+            )
+
+        if table_name == "combat_updates":
+            raw_encounter = data_payload.get("encounter")
+            raw_outcome = data_payload.get("outcome")
+            if not isinstance(raw_encounter, str) or not isinstance(raw_outcome, str):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Combat update create requires encounter/outcome",
+                )
+
+            combat = CombatUpdate(
+                game_id=flag.game_id,
+                note_id=audit_note_id,
+                encounter=raw_encounter,
+                outcome=raw_outcome,
+            )
+            session.add(combat)
+            await session.flush()
+            if not isinstance(combat.id, int):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_state",
+                    message="Combat update insert did not return id",
+                )
+            _add_embed_id("combat_updates", combat.id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Combat update created",
+                details={"id": combat.id},
+            )
+
+    if operation == "update":
+        target_id = _target_id_from_flag_or_change(change)
+        if not isinstance(target_id, int):
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="invalid_shape",
+                message="Update operation requires target_id or suggested_change.id",
+            )
+
+        changes = change.get("changes")
+        if not isinstance(changes, dict):
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="invalid_shape",
+                message="Update operation requires suggested_change.changes dict",
+            )
+
+        if table_name == "entities":
+            existing = (
+                await session.execute(
+                    sa.select(Entity.name, Entity.entity_type).where(
+                        Entity.id == target_id,
+                        Entity.game_id == flag.game_id,
+                    )
+                )
+            ).one_or_none()
+            if existing is None:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Entity not found",
+                    details={"target_id": target_id},
+                )
+
+            values: dict[str, Any] = {}
+            if isinstance(changes.get("name"), str) and changes["name"].strip():
+                values["name"] = changes["name"].strip()
+            if isinstance(changes.get("entity_type"), str) and changes["entity_type"].strip():
+                candidate_entity_type = changes["entity_type"].strip().lower()
+                if candidate_entity_type not in allowed_entity_types:
+                    return _result(
+                        ok=False,
+                        noop=False,
+                        reason_code="invalid_shape",
+                        message="Entity update has invalid entity_type",
+                    )
+                values["entity_type"] = candidate_entity_type
+            if isinstance(changes.get("description"), str):
+                values["description"] = changes["description"]
+            if not values:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Entity update has no applicable changes",
+                )
+
+            next_name = values.get("name", existing[0])
+            next_entity_type = values.get("entity_type", existing[1])
+            collision = await session.execute(
+                sa.select(Entity.id)
+                .where(
+                    Entity.game_id == flag.game_id,
+                    Entity.id != target_id,
+                    Entity.name == next_name,
+                    Entity.entity_type == next_entity_type,
+                )
+                .limit(1)
+            )
+            if collision.scalar_one_or_none() is not None:
+                return _result(
+                    ok=True,
+                    noop=True,
+                    reason_code="noop_conflict",
+                    message="Entity update would violate uniqueness",
+                    details={"target_id": target_id},
+                )
+
+            values["updated_at"] = sa.func.now()
+            updated = await session.execute(
+                sa.update(Entity)
+                .where(Entity.id == target_id, Entity.game_id == flag.game_id)
+                .values(**values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Entity not found",
+                    details={"target_id": target_id},
+                )
+            _add_embed_id("entities", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Entity updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "quests":
+            existing = (
+                await session.execute(
+                    sa.select(Quest.name, Quest.description).where(
+                        Quest.id == target_id,
+                        Quest.game_id == flag.game_id,
+                    )
+                )
+            ).one_or_none()
+            if existing is None:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Quest not found",
+                    details={"target_id": target_id},
+                )
+
+            audit_note_id = await _load_audit_note_id()
+            if not isinstance(audit_note_id, int):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_state",
+                    message="Audit run is missing audit_note_id",
+                    details={"audit_run_id": flag.audit_run_id},
+                )
+
+            quest_values: dict[str, Any] = {
+                "note_ids": sa.func.array_append(Quest.note_ids, audit_note_id),
+                "updated_at": sa.func.now(),
+            }
+            if isinstance(changes.get("name"), str) and changes["name"].strip():
+                next_name = changes["name"].strip()
+                collision = await session.execute(
+                    sa.select(Quest.id)
+                    .where(
+                        Quest.game_id == flag.game_id,
+                        Quest.id != target_id,
+                        Quest.name == next_name,
+                    )
+                    .limit(1)
+                )
+                if collision.scalar_one_or_none() is not None:
+                    return _result(
+                        ok=True,
+                        noop=True,
+                        reason_code="noop_conflict",
+                        message="Quest update would violate uniqueness",
+                        details={"target_id": target_id},
+                    )
+                quest_values["name"] = next_name
+
+            if isinstance(changes.get("description"), str):
+                new_description = changes["description"]
+                old_description = existing[1]
+                if isinstance(old_description, str) and old_description != new_description:
+                    session.add(
+                        QuestDescriptionHistory(
+                            quest_id=target_id,
+                            description=old_description,
+                            note_id=audit_note_id,
+                        )
+                    )
+                quest_values["description"] = new_description
+
+            if isinstance(changes.get("status"), str):
+                next_status = changes["status"].strip().lower()
+                if next_status not in {"active", "completed"}:
+                    return _result(
+                        ok=False,
+                        noop=False,
+                        reason_code="invalid_shape",
+                        message="Quest update has invalid status",
+                    )
+                quest_values["status"] = next_status
+
+            if "quest_giver_entity_id" in changes or "entity_name" in changes or "quest_giver_entity_name" in changes:
+                if "quest_giver_entity_id" in changes and changes.get("quest_giver_entity_id") is None:
+                    quest_values["quest_giver_entity_id"] = None
+                else:
+                    resolved_entity_id = await _resolve_entity_id(
+                        raw_entity_id=changes.get("quest_giver_entity_id"),
+                        raw_entity_name=changes.get("entity_name") or changes.get("quest_giver_entity_name"),
+                    )
+                    if resolved_entity_id is not None:
+                        quest_values["quest_giver_entity_id"] = resolved_entity_id
+
+            updated = await session.execute(
+                sa.update(Quest)
+                .where(Quest.id == target_id, Quest.game_id == flag.game_id)
+                .values(**quest_values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Quest not found",
+                    details={"target_id": target_id},
+                )
+
+            _add_embed_id("quests", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Quest updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "threads":
+            if changes.get("is_resolved") is False:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Thread reopen is unsupported in update operation",
+                    details={"target_id": target_id},
+                )
+
+            thread_values: dict[str, Any] = {}
+            if isinstance(changes.get("text"), str):
+                thread_values["text"] = changes["text"]
+            if isinstance(changes.get("resolution"), str):
+                thread_values["resolution"] = changes["resolution"]
+
+            if "quest_id" in changes:
+                raw_quest_id = changes.get("quest_id")
+                if raw_quest_id is None:
+                    thread_values["quest_id"] = None
+                else:
+                    resolved_quest_id = await _resolve_quest_id(
+                        raw_quest_id=raw_quest_id,
+                        raw_quest_name=changes.get("quest_name"),
+                    )
+                    if resolved_quest_id is not None:
+                        thread_values["quest_id"] = resolved_quest_id
+            elif "quest_name" in changes:
+                resolved_quest_id = await _resolve_quest_id(
+                    raw_quest_id=None,
+                    raw_quest_name=changes.get("quest_name"),
+                )
+                if resolved_quest_id is not None:
+                    thread_values["quest_id"] = resolved_quest_id
+
+            if changes.get("is_resolved") is True:
+                audit_note_id = await _load_audit_note_id()
+                if not isinstance(audit_note_id, int):
+                    return _result(
+                        ok=False,
+                        noop=False,
+                        reason_code="invalid_state",
+                        message="Audit run is missing audit_note_id",
+                        details={"audit_run_id": flag.audit_run_id},
+                    )
+                thread_values["is_resolved"] = True
+                thread_values["resolved_by_note_id"] = audit_note_id
+                thread_values["resolved_at"] = sa.func.now()
+
+            if not thread_values:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Thread update has no applicable changes",
+                )
+
+            updated = await session.execute(
+                sa.update(Thread)
+                .where(
+                    Thread.id == target_id,
+                    Thread.game_id == flag.game_id,
+                    Thread.is_deleted == False,  # noqa: E712
+                )
+                .values(**thread_values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Thread not found",
+                    details={"target_id": target_id},
+                )
+
+            _add_embed_id("threads", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Thread updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "events":
+            next_text = changes.get("text")
+            if not isinstance(next_text, str):
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Event update requires text",
+                )
+
+            collision = await session.execute(
+                sa.select(Event.id)
+                .where(
+                    Event.game_id == flag.game_id,
+                    Event.id != target_id,
+                    Event.text == next_text,
+                )
+                .limit(1)
+            )
+            if collision.scalar_one_or_none() is not None:
+                return _result(
+                    ok=True,
+                    noop=True,
+                    reason_code="noop_conflict",
+                    message="Event update skipped due to uniqueness collision",
+                    details={"target_id": target_id},
+                )
+
+            updated = await session.execute(
+                sa.update(Event)
+                .where(Event.id == target_id, Event.game_id == flag.game_id)
+                .values(text=next_text)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Event not found",
+                    details={"target_id": target_id},
+                )
+
+            _add_embed_id("events", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Event updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "decisions":
+            decision_values: dict[str, Any] = {}
+            if isinstance(changes.get("decision"), str):
+                decision_values["decision"] = changes["decision"]
+            if isinstance(changes.get("made_by"), str):
+                decision_values["made_by"] = changes["made_by"]
+            if not decision_values:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Decision update has no applicable changes",
+                )
+
+            updated = await session.execute(
+                sa.update(Decision)
+                .where(Decision.id == target_id, Decision.game_id == flag.game_id)
+                .values(**decision_values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Decision not found",
+                    details={"target_id": target_id},
+                )
+
+            _add_embed_id("decisions", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Decision updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "loot":
+            existing = (
+                await session.execute(
+                    sa.select(Loot.item_name, Loot.acquired_by).where(
+                        Loot.id == target_id,
+                        Loot.game_id == flag.game_id,
+                    )
+                )
+            ).one_or_none()
+            if existing is None:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Loot not found",
+                    details={"target_id": target_id},
+                )
+
+            loot_values: dict[str, Any] = {}
+            if isinstance(changes.get("item_name"), str) and changes["item_name"].strip():
+                loot_values["item_name"] = changes["item_name"].strip()
+            if isinstance(changes.get("acquired_by"), str) and changes["acquired_by"].strip():
+                loot_values["acquired_by"] = changes["acquired_by"].strip()
+
+            if "quest_id" in changes:
+                raw_quest_id = changes.get("quest_id")
+                if raw_quest_id is None:
+                    loot_values["quest_id"] = None
+                else:
+                    resolved_quest_id = await _resolve_quest_id(
+                        raw_quest_id=raw_quest_id,
+                        raw_quest_name=changes.get("quest_name"),
+                    )
+                    if resolved_quest_id is not None:
+                        loot_values["quest_id"] = resolved_quest_id
+            elif "quest_name" in changes:
+                resolved_quest_id = await _resolve_quest_id(
+                    raw_quest_id=None,
+                    raw_quest_name=changes.get("quest_name"),
+                )
+                if resolved_quest_id is not None:
+                    loot_values["quest_id"] = resolved_quest_id
+
+            if not loot_values:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Loot update has no applicable changes",
+                )
+
+            next_item_name = loot_values.get("item_name", existing[0])
+            next_acquired_by = loot_values.get("acquired_by", existing[1])
+            collision = await session.execute(
+                sa.select(Loot.id)
+                .where(
+                    Loot.game_id == flag.game_id,
+                    Loot.id != target_id,
+                    Loot.item_name == next_item_name,
+                    Loot.acquired_by == next_acquired_by,
+                )
+                .limit(1)
+            )
+            if collision.scalar_one_or_none() is not None:
+                return _result(
+                    ok=True,
+                    noop=True,
+                    reason_code="noop_conflict",
+                    message="Loot update skipped due to uniqueness collision",
+                    details={"target_id": target_id},
+                )
+
+            updated = await session.execute(
+                sa.update(Loot)
+                .where(Loot.id == target_id, Loot.game_id == flag.game_id)
+                .values(**loot_values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Loot not found",
+                    details={"target_id": target_id},
+                )
+
+            _add_embed_id("loot", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Loot updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "important_quotes":
+            quote_values: dict[str, Any] = {}
+            if isinstance(changes.get("text"), str):
+                quote_values["text"] = changes["text"]
+            if "speaker" in changes and (
+                changes.get("speaker") is None or isinstance(changes.get("speaker"), str)
+            ):
+                quote_values["speaker"] = changes.get("speaker")
+            if "transcript_id" in changes:
+                raw_transcript_id = changes.get("transcript_id")
+                if raw_transcript_id is None:
+                    quote_values["transcript_id"] = None
+                elif isinstance(raw_transcript_id, int):
+                    transcript_exists = await session.execute(
+                        sa.select(Transcript.id).where(
+                            Transcript.id == raw_transcript_id,
+                            Transcript.game_id == flag.game_id,
+                        )
+                    )
+                    if transcript_exists.scalar_one_or_none() is not None:
+                        quote_values["transcript_id"] = raw_transcript_id
+
+            if not quote_values:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Important quote update has no applicable changes",
+                )
+
+            updated = await session.execute(
+                sa.update(ImportantQuote)
+                .where(ImportantQuote.id == target_id, ImportantQuote.game_id == flag.game_id)
+                .values(**quote_values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Important quote not found",
+                    details={"target_id": target_id},
+                )
+
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Important quote updated",
+                details={"target_id": target_id},
+            )
+
+        if table_name == "combat_updates":
+            combat_values: dict[str, Any] = {}
+            if isinstance(changes.get("encounter"), str):
+                combat_values["encounter"] = changes["encounter"]
+            if isinstance(changes.get("outcome"), str):
+                combat_values["outcome"] = changes["outcome"]
+            if not combat_values:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="invalid_shape",
+                    message="Combat update has no applicable changes",
+                )
+
+            updated = await session.execute(
+                sa.update(CombatUpdate)
+                .where(CombatUpdate.id == target_id, CombatUpdate.game_id == flag.game_id)
+                .values(**combat_values)
+            )
+            if _affected_rows(updated) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Combat update not found",
+                    details={"target_id": target_id},
+                )
+
+            _add_embed_id("combat_updates", target_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Combat update modified",
+                details={"target_id": target_id},
+            )
+
+    if operation == "delete":
+        target_id = _target_id_from_flag_or_change(change)
+        if not isinstance(target_id, int):
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="invalid_shape",
+                message="Delete operation requires target_id or suggested_change.id",
+            )
+
+        reason = change.get("reason")
+        delete_reason = (
+            reason.strip()
+            if isinstance(reason, str) and reason.strip()
+            else "audit flag deletion candidate"
+        )
+
+        if table_name == "quests":
+            existing = await session.execute(
+                sa.select(Quest.is_deleted).where(Quest.id == target_id, Quest.game_id == flag.game_id)
+            )
+            is_deleted = existing.scalar_one_or_none()
+            if is_deleted is None:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Quest not found",
+                    details={"target_id": target_id},
+                )
+            if is_deleted:
+                return _result(
+                    ok=True,
+                    noop=True,
+                    reason_code="already_deleted",
+                    message="Quest already soft-deleted",
+                    details={"target_id": target_id},
+                )
+
             await session.execute(
                 sa.update(Quest)
-                .where(Quest.id == record_id, Quest.game_id == flag.game_id)
+                .where(Quest.id == target_id, Quest.game_id == flag.game_id)
                 .values(
                     is_deleted=True,
                     deleted_at=sa.func.now(),
-                    deleted_reason=reason,
+                    deleted_reason=delete_reason,
                     updated_at=sa.func.now(),
                 )
             )
-            return True, False, "applied", "Quest soft-deleted", {"record_id": record_id}
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Quest soft-deleted",
+                details={"target_id": target_id},
+            )
 
         if table_name == "threads":
-            thread = await session.get(Thread, record_id)
-            if thread is None or thread.game_id != flag.game_id:
-                return False, False, "not_found", "Thread deletion candidate not found", {"record_id": record_id}
-            if thread.is_deleted:
-                return True, True, "already_deleted", "Thread already soft-deleted", {"record_id": record_id}
+            existing = await session.execute(
+                sa.select(Thread.is_deleted).where(Thread.id == target_id, Thread.game_id == flag.game_id)
+            )
+            is_deleted = existing.scalar_one_or_none()
+            if is_deleted is None:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Thread not found",
+                    details={"target_id": target_id},
+                )
+            if is_deleted:
+                return _result(
+                    ok=True,
+                    noop=True,
+                    reason_code="already_deleted",
+                    message="Thread already soft-deleted",
+                    details={"target_id": target_id},
+                )
+
             await session.execute(
                 sa.update(Thread)
-                .where(Thread.id == record_id, Thread.game_id == flag.game_id)
+                .where(Thread.id == target_id, Thread.game_id == flag.game_id)
                 .values(
                     is_deleted=True,
                     deleted_at=sa.func.now(),
-                    deleted_reason=reason,
+                    deleted_reason=delete_reason,
                 )
             )
-            return True, False, "applied", "Thread soft-deleted", {"record_id": record_id}
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Thread soft-deleted",
+                details={"target_id": target_id},
+            )
 
         if table_name == "entities":
-            entity = await session.get(Entity, record_id)
+            entity = await session.get(Entity, target_id)
             if entity is None or entity.game_id != flag.game_id:
-                return False, False, "not_found", "Entity deletion candidate not found", {"record_id": record_id}
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Entity not found",
+                    details={"target_id": target_id},
+                )
+
             await session.execute(
                 sa.update(Quest)
-                .where(Quest.game_id == flag.game_id, Quest.quest_giver_entity_id == record_id)
+                .where(Quest.game_id == flag.game_id, Quest.quest_giver_entity_id == target_id)
                 .values(quest_giver_entity_id=None, updated_at=sa.func.now())
             )
             await session.execute(
-                sa.delete(notes_entities_table).where(notes_entities_table.c.entity_id == record_id)
+                sa.delete(notes_entities_table).where(notes_entities_table.c.entity_id == target_id)
             )
-            await session.execute(
-                sa.delete(Entity).where(Entity.id == record_id, Entity.game_id == flag.game_id)
+            deleted = await session.execute(
+                sa.delete(Entity).where(Entity.id == target_id, Entity.game_id == flag.game_id)
             )
-            return True, False, "applied", "Entity hard-deleted", {"record_id": record_id}
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Entity not found",
+                    details={"target_id": target_id},
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Entity hard-deleted",
+                details={"target_id": target_id},
+            )
 
         if table_name == "events":
-            await session.execute(sa.delete(notes_events_table).where(notes_events_table.c.event_id == record_id))
-            result = await session.execute(
-                sa.delete(Event).where(Event.id == record_id, Event.game_id == flag.game_id)
+            await session.execute(
+                sa.delete(notes_events_table).where(notes_events_table.c.event_id == target_id)
             )
-            if _affected_rows(result) == 0:
-                return False, False, "not_found", "Event deletion candidate not found", {"record_id": record_id}
-            return True, False, "applied", "Event hard-deleted", {"record_id": record_id}
+            deleted = await session.execute(
+                sa.delete(Event).where(Event.id == target_id, Event.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Event not found",
+                    details={"target_id": target_id},
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Event hard-deleted",
+                details={"target_id": target_id},
+            )
 
         if table_name == "loot":
-            await session.execute(sa.delete(notes_loot_table).where(notes_loot_table.c.loot_id == record_id))
-            result = await session.execute(
-                sa.delete(Loot).where(Loot.id == record_id, Loot.game_id == flag.game_id)
+            await session.execute(
+                sa.delete(notes_loot_table).where(notes_loot_table.c.loot_id == target_id)
             )
-            if _affected_rows(result) == 0:
-                return False, False, "not_found", "Loot deletion candidate not found", {"record_id": record_id}
-            return True, False, "applied", "Loot hard-deleted", {"record_id": record_id}
+            deleted = await session.execute(
+                sa.delete(Loot).where(Loot.id == target_id, Loot.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Loot not found",
+                    details={"target_id": target_id},
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Loot hard-deleted",
+                details={"target_id": target_id},
+            )
 
         if table_name == "decisions":
-            result = await session.execute(
-                sa.delete(Decision).where(Decision.id == record_id, Decision.game_id == flag.game_id)
+            deleted = await session.execute(
+                sa.delete(Decision).where(Decision.id == target_id, Decision.game_id == flag.game_id)
             )
-            if _affected_rows(result) == 0:
-                return False, False, "not_found", "Decision deletion candidate not found", {"record_id": record_id}
-            return True, False, "applied", "Decision hard-deleted", {"record_id": record_id}
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Decision not found",
+                    details={"target_id": target_id},
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Decision hard-deleted",
+                details={"target_id": target_id},
+            )
 
         if table_name == "important_quotes":
-            result = await session.execute(
+            deleted = await session.execute(
                 sa.delete(ImportantQuote).where(
-                    ImportantQuote.id == record_id,
+                    ImportantQuote.id == target_id,
                     ImportantQuote.game_id == flag.game_id,
                 )
             )
-            if _affected_rows(result) == 0:
-                return (
-                    False,
-                    False,
-                    "not_found",
-                    "Important quote deletion candidate not found",
-                    {"record_id": record_id},
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Important quote not found",
+                    details={"target_id": target_id},
                 )
-            return True, False, "applied", "Important quote hard-deleted", {"record_id": record_id}
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Important quote hard-deleted",
+                details={"target_id": target_id},
+            )
 
-        return False, False, "unsupported_table", "Unsupported deletion_candidate table", {
-            "table": table_name
+        if table_name == "combat_updates":
+            deleted = await session.execute(
+                sa.delete(CombatUpdate).where(
+                    CombatUpdate.id == target_id,
+                    CombatUpdate.game_id == flag.game_id,
+                )
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Combat update not found",
+                    details={"target_id": target_id},
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Combat update hard-deleted",
+                details={"target_id": target_id},
+            )
+
+    if operation == "merge":
+        canonical_id = change.get("canonical_id")
+        duplicate_id = change.get("duplicate_id")
+        if not isinstance(canonical_id, int) or not isinstance(duplicate_id, int):
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="invalid_shape",
+                message="Merge operation requires canonical_id and duplicate_id",
+            )
+        if canonical_id == duplicate_id:
+            return _result(
+                ok=True,
+                noop=True,
+                reason_code="noop_same_record",
+                message="Merge canonical_id and duplicate_id are identical",
+                details={"canonical_id": canonical_id},
+            )
+
+        model_map = {
+            "entities": Entity,
+            "quests": Quest,
+            "threads": Thread,
+            "events": Event,
+            "decisions": Decision,
+            "loot": Loot,
+            "important_quotes": ImportantQuote,
+            "combat_updates": CombatUpdate,
         }
+        model_cls = model_map[table_name]
+        canonical_game_id = await _row_game_id(model_cls, canonical_id)
+        duplicate_game_id = await _row_game_id(model_cls, duplicate_id)
+        if canonical_game_id is None or duplicate_game_id is None:
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="not_found",
+                message="Merge canonical or duplicate row not found",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+        if canonical_game_id != flag.game_id or duplicate_game_id != flag.game_id:
+            return _result(
+                ok=False,
+                noop=False,
+                reason_code="cross_game",
+                message="Merge rows do not belong to flag game",
+                details={
+                    "canonical_game_id": canonical_game_id,
+                    "duplicate_game_id": duplicate_game_id,
+                    "flag_game_id": flag.game_id,
+                },
+            )
 
-    return False, False, "unsupported_flag_type", "Unsupported or invalid audit flag shape", {
-        "flag_type": flag.flag_type
-    }
+        if table_name == "entities":
+            duplicate_note_rows = await session.execute(
+                sa.select(notes_entities_table.c.note_id).where(notes_entities_table.c.entity_id == duplicate_id)
+            )
+            for note_id in [row[0] for row in duplicate_note_rows.all()]:
+                await session.execute(
+                    pg_insert(notes_entities_table)
+                    .values(note_id=note_id, entity_id=canonical_id)
+                    .on_conflict_do_nothing()
+                )
+
+            await session.execute(
+                sa.update(Quest)
+                .where(Quest.game_id == flag.game_id, Quest.quest_giver_entity_id == duplicate_id)
+                .values(quest_giver_entity_id=canonical_id, updated_at=sa.func.now())
+            )
+            await session.execute(
+                sa.delete(notes_entities_table).where(notes_entities_table.c.entity_id == duplicate_id)
+            )
+            deleted = await session.execute(
+                sa.delete(Entity).where(Entity.id == duplicate_id, Entity.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate entity not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            _add_embed_id("entities", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Entity merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "quests":
+            canonical_notes = (
+                await session.execute(sa.select(Quest.note_ids).where(Quest.id == canonical_id))
+            ).scalar_one_or_none()
+            duplicate_notes = (
+                await session.execute(sa.select(Quest.note_ids).where(Quest.id == duplicate_id))
+            ).scalar_one_or_none()
+            if canonical_notes is None or duplicate_notes is None:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Merge canonical or duplicate quest not found",
+                )
+
+            merged_note_ids: list[int] = []
+            seen_note_ids: set[int] = set()
+            for note_id in [*(canonical_notes or []), *(duplicate_notes or [])]:
+                if isinstance(note_id, int) and note_id not in seen_note_ids:
+                    seen_note_ids.add(note_id)
+                    merged_note_ids.append(note_id)
+
+            await session.execute(
+                sa.update(Quest)
+                .where(Quest.id == canonical_id, Quest.game_id == flag.game_id)
+                .values(note_ids=merged_note_ids, updated_at=sa.func.now())
+            )
+            await session.execute(
+                sa.update(Thread)
+                .where(Thread.game_id == flag.game_id, Thread.quest_id == duplicate_id)
+                .values(quest_id=canonical_id)
+            )
+            await session.execute(
+                sa.update(Loot)
+                .where(Loot.game_id == flag.game_id, Loot.quest_id == duplicate_id)
+                .values(quest_id=canonical_id)
+            )
+            deleted = await session.execute(
+                sa.delete(Quest).where(Quest.id == duplicate_id, Quest.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate quest not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+
+            _add_embed_id("quests", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Quest merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "events":
+            duplicate_note_rows = await session.execute(
+                sa.select(notes_events_table.c.note_id).where(notes_events_table.c.event_id == duplicate_id)
+            )
+            for note_id in [row[0] for row in duplicate_note_rows.all()]:
+                await session.execute(
+                    pg_insert(notes_events_table)
+                    .values(note_id=note_id, event_id=canonical_id)
+                    .on_conflict_do_nothing()
+                )
+            await session.execute(
+                sa.delete(notes_events_table).where(notes_events_table.c.event_id == duplicate_id)
+            )
+            deleted = await session.execute(
+                sa.delete(Event).where(Event.id == duplicate_id, Event.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate event not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            _add_embed_id("events", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Event merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "loot":
+            duplicate_note_rows = await session.execute(
+                sa.select(notes_loot_table.c.note_id).where(notes_loot_table.c.loot_id == duplicate_id)
+            )
+            for note_id in [row[0] for row in duplicate_note_rows.all()]:
+                await session.execute(
+                    pg_insert(notes_loot_table)
+                    .values(note_id=note_id, loot_id=canonical_id)
+                    .on_conflict_do_nothing()
+                )
+            await session.execute(
+                sa.delete(notes_loot_table).where(notes_loot_table.c.loot_id == duplicate_id)
+            )
+            deleted = await session.execute(
+                sa.delete(Loot).where(Loot.id == duplicate_id, Loot.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate loot not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            _add_embed_id("loot", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Loot merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "threads":
+            deleted = await session.execute(
+                sa.delete(Thread).where(Thread.id == duplicate_id, Thread.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate thread not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            _add_embed_id("threads", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Thread merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "decisions":
+            deleted = await session.execute(
+                sa.delete(Decision).where(Decision.id == duplicate_id, Decision.game_id == flag.game_id)
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate decision not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            _add_embed_id("decisions", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Decision merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "important_quotes":
+            deleted = await session.execute(
+                sa.delete(ImportantQuote).where(
+                    ImportantQuote.id == duplicate_id,
+                    ImportantQuote.game_id == flag.game_id,
+                )
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate important quote not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Important quote merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+        if table_name == "combat_updates":
+            deleted = await session.execute(
+                sa.delete(CombatUpdate).where(
+                    CombatUpdate.id == duplicate_id,
+                    CombatUpdate.game_id == flag.game_id,
+                )
+            )
+            if _affected_rows(deleted) == 0:
+                return _result(
+                    ok=False,
+                    noop=False,
+                    reason_code="not_found",
+                    message="Duplicate combat update not found",
+                    details={"duplicate_id": duplicate_id},
+                )
+            _add_embed_id("combat_updates", canonical_id)
+            return _result(
+                ok=True,
+                noop=False,
+                reason_code="applied",
+                message="Combat update merged",
+                details={"canonical_id": canonical_id, "duplicate_id": duplicate_id},
+            )
+
+    return _result(
+        ok=False,
+        noop=False,
+        reason_code="unsupported_operation",
+        message="Unsupported operation/table_name combination",
+        details={"operation": operation, "table_name": table_name},
+    )
 
 
 async def apply_audit_flag(flag_id: int) -> AuditFlagMutationResult:
     """Apply an audit flag action with idempotent status semantics."""
+    embed_ids: dict[str, list[int]] = {}
+    mutation_result: Optional[AuditFlagMutationResult] = None
+
     async with AsyncSessionLocal() as session:
         async with session.begin():
             flag_result = await session.execute(
@@ -982,16 +2461,16 @@ async def apply_audit_flag(flag_id: int) -> AuditFlagMutationResult:
                     message="Flag must be pending before apply",
                 )
 
-            ok, noop, reason_code, message, details = await _apply_flag_change(session, flag)
-            if not ok:
+            apply_result = await _apply_flag_change(session, flag)
+            if not apply_result.ok:
                 return _flag_result(
                     flag_id=flag.id,
                     ok=False,
-                    noop=noop,
+                    noop=apply_result.noop,
                     status=flag.status,
-                    reason_code=reason_code,
-                    message=message,
-                    details=details,
+                    reason_code=apply_result.reason_code,
+                    message=apply_result.message,
+                    details=apply_result.details,
                 )
 
             await session.execute(
@@ -999,15 +2478,22 @@ async def apply_audit_flag(flag_id: int) -> AuditFlagMutationResult:
                 .where(AuditFlag.id == flag.id)
                 .values(status="applied", resolved_at=sa.func.now())
             )
-            return _flag_result(
+
+            embed_ids = apply_result.embed_ids
+            mutation_result = _flag_result(
                 flag_id=flag.id,
                 ok=True,
-                noop=noop,
+                noop=apply_result.noop,
                 status="applied",
-                reason_code=reason_code,
-                message=message,
-                details=details,
+                reason_code=apply_result.reason_code,
+                message=apply_result.message,
+                details=apply_result.details,
             )
+
+    assert mutation_result is not None
+    if mutation_result.ok and not mutation_result.noop and embed_ids:
+        asyncio.create_task(_write_flag_embeddings(embed_ids))
+    return mutation_result
 
 
 async def dismiss_audit_flag(flag_id: int) -> AuditFlagMutationResult:
@@ -1524,26 +3010,35 @@ async def write_audit_pipeline_result(
     Step 2 applies all corrections/creations/flags/finalization atomically.
     """
     output_payload = _model_to_dict(output)
+    table_order: tuple[str, ...] = (
+        "entities",
+        "quests",
+        "threads",
+        "events",
+        "decisions",
+        "loot",
+        "important_quotes",
+        "combat_updates",
+    )
 
-    entity_description_updates = _model_list_to_dicts(output_payload.get("entity_description_updates"))
-    quest_description_updates = _model_list_to_dicts(output_payload.get("quest_description_updates"))
-    quest_status_updates = _model_list_to_dicts(output_payload.get("quest_status_updates"))
-    thread_resolutions = _model_list_to_dicts(output_payload.get("thread_resolutions"))
-    thread_text_updates = _model_list_to_dicts(output_payload.get("thread_text_updates"))
-    event_text_updates = _model_list_to_dicts(output_payload.get("event_text_updates"))
-    decision_corrections = _model_list_to_dicts(output_payload.get("decision_corrections"))
-    loot_corrections = _model_list_to_dicts(output_payload.get("loot_corrections"))
-    quote_corrections = _model_list_to_dicts(output_payload.get("quote_corrections"))
-
-    new_entities = _model_list_to_dicts(output_payload.get("new_entities"))
-    new_events = _model_list_to_dicts(output_payload.get("new_events"))
-    new_decisions = _model_list_to_dicts(output_payload.get("new_decisions"))
-    new_loot = _model_list_to_dicts(output_payload.get("new_loot"))
-    new_quests = _model_list_to_dicts(output_payload.get("new_quests"))
-    new_threads = _model_list_to_dicts(output_payload.get("new_threads"))
-    new_quotes = _model_list_to_dicts(output_payload.get("new_quotes"))
-    new_combat = _model_list_to_dicts(output_payload.get("new_combat"))
-    audit_flags = _model_list_to_dicts(output_payload.get("audit_flags"))
+    table_changesets: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for table_name in table_order:
+        raw_changeset = output_payload.get(table_name)
+        changeset_payload: dict[str, Any] = {}
+        if raw_changeset is not None:
+            try:
+                changeset_payload = _model_to_dict(raw_changeset)
+            except TypeError:
+                logger.warning(
+                    "Audit output table '%s' is malformed; using empty changeset",
+                    table_name,
+                )
+        table_changesets[table_name] = {
+            "creates": _model_list_to_dicts(changeset_payload.get("creates")),
+            "updates": _model_list_to_dicts(changeset_payload.get("updates")),
+            "deletes": _model_list_to_dicts(changeset_payload.get("deletes")),
+            "merges": _model_list_to_dicts(changeset_payload.get("merges")),
+        }
 
     note_ids_audited = sorted({n.id for n in notes})
     min_note_id = min(note_ids_audited) if note_ids_audited else None
@@ -1591,6 +3086,1089 @@ async def write_audit_pipeline_result(
         # Step 2+: single atomic transaction.
         async with AsyncSessionLocal() as session:
             async with session.begin():
+                snapshot_fields_by_table: dict[str, tuple[str, ...]] = {
+                    "entities": ("id", "name", "entity_type", "description"),
+                    "quests": ("id", "name", "description", "status", "quest_giver_entity_id"),
+                    "threads": ("id", "text", "is_resolved", "resolution", "quest_id"),
+                    "events": ("id", "text"),
+                    "decisions": ("id", "decision", "made_by"),
+                    "loot": ("id", "item_name", "acquired_by", "quest_id"),
+                    "important_quotes": ("id", "text", "speaker", "transcript_id"),
+                    "combat_updates": ("id", "encounter", "outcome"),
+                }
+                table_model_by_name: dict[str, Any] = {
+                    "entities": Entity,
+                    "quests": Quest,
+                    "threads": Thread,
+                    "events": Event,
+                    "decisions": Decision,
+                    "loot": Loot,
+                    "important_quotes": ImportantQuote,
+                    "combat_updates": CombatUpdate,
+                }
+                allowed_entity_types = {member.value for member in EntityType}
+
+                entity_name_to_id: dict[str, int] = {}
+                quest_name_to_id: dict[str, int] = {}
+
+                def _normalize_name(value: Any) -> Optional[str]:
+                    if not isinstance(value, str):
+                        return None
+                    normalized = value.strip().lower()
+                    return normalized if normalized else None
+
+                def _coerce_dict(value: Any, *, fallback_label: str) -> dict[str, Any]:
+                    if isinstance(value, dict):
+                        return dict(value)
+                    if value is None:
+                        return {}
+                    try:
+                        return _model_to_dict(value)
+                    except TypeError:
+                        logger.warning("Skipping malformed %s payload: %s", fallback_label, value)
+                        return {}
+
+                def _normalize_confidence(op: dict[str, Any], *, context: str) -> str:
+                    raw = op.get("confidence")
+                    if isinstance(raw, str):
+                        normalized = raw.strip().lower()
+                        if normalized in {"low", "medium", "high"}:
+                            return normalized
+                    logger.warning(
+                        "Malformed confidence in %s; defaulting to 'medium': %s",
+                        context,
+                        op,
+                    )
+                    return "medium"
+
+                def _normalize_description(op: dict[str, Any], *, fallback: str) -> str:
+                    raw = op.get("description")
+                    if isinstance(raw, str):
+                        text = raw.strip()
+                        if text:
+                            return text
+                    return fallback
+
+                def _track_embedding_id(table_name: str, record_id: int) -> None:
+                    if table_name == "entities":
+                        entity_ids_to_embed.add(record_id)
+                    elif table_name == "threads":
+                        thread_ids_to_embed.add(record_id)
+                    elif table_name == "events":
+                        event_ids_to_embed.add(record_id)
+                    elif table_name == "decisions":
+                        decision_ids_to_embed.add(record_id)
+                    elif table_name == "loot":
+                        loot_ids_to_embed.add(record_id)
+                    elif table_name == "quests":
+                        quest_ids_to_embed.add(record_id)
+                    elif table_name == "combat_updates":
+                        combat_ids_to_embed.add(record_id)
+
+                async def _load_snapshot(table_name: str, record_id: int) -> Optional[dict[str, Any]]:
+                    model_cls = table_model_by_name[table_name]
+                    fields = snapshot_fields_by_table[table_name]
+                    columns = [getattr(model_cls, field_name) for field_name in fields]
+                    result = await session.execute(
+                        sa.select(*columns)
+                        .where(
+                            model_cls.id == record_id,
+                            model_cls.game_id == game_id,
+                        )
+                        .limit(1)
+                    )
+                    row = result.one_or_none()
+                    if row is None:
+                        return None
+                    return {field_name: row[idx] for idx, field_name in enumerate(fields)}
+
+                async def _resolve_entity_reference(
+                    *,
+                    raw_entity_id: Any,
+                    raw_entity_name: Any,
+                ) -> Optional[int]:
+                    if isinstance(raw_entity_id, int):
+                        existing = await session.execute(
+                            sa.select(Entity.id).where(Entity.id == raw_entity_id, Entity.game_id == game_id)
+                        )
+                        if existing.scalar_one_or_none() is not None:
+                            return raw_entity_id
+                        logger.warning(
+                            "Ignoring quest_giver_entity_id=%s not found in game_id=%d",
+                            raw_entity_id,
+                            game_id,
+                        )
+                        return None
+                    if raw_entity_id is None:
+                        normalized_name = _normalize_name(raw_entity_name)
+                        if normalized_name is not None:
+                            return entity_name_to_id.get(normalized_name)
+                    return None
+
+                async def _resolve_quest_reference(
+                    *,
+                    raw_quest_id: Any,
+                    raw_quest_name: Any,
+                ) -> Optional[int]:
+                    if isinstance(raw_quest_id, int):
+                        existing = await session.execute(
+                            sa.select(Quest.id).where(
+                                Quest.id == raw_quest_id,
+                                Quest.game_id == game_id,
+                                Quest.is_deleted == False,  # noqa: E712
+                            )
+                        )
+                        if existing.scalar_one_or_none() is not None:
+                            return raw_quest_id
+                        logger.warning(
+                            "Ignoring quest_id=%s not found/active in game_id=%d",
+                            raw_quest_id,
+                            game_id,
+                        )
+                        return None
+                    if raw_quest_id is None:
+                        normalized_name = _normalize_name(raw_quest_name)
+                        if normalized_name is not None:
+                            return quest_name_to_id.get(normalized_name)
+                    return None
+
+                def _append_flag(
+                    *,
+                    operation: str,
+                    table_name: str,
+                    confidence: str,
+                    target_id: Optional[int],
+                    description: str,
+                    suggested_change: dict[str, Any],
+                    status: str,
+                ) -> None:
+                    resolved_at = datetime.now(timezone.utc) if status == "applied" else None
+                    session.add(
+                        AuditFlag(
+                            game_id=game_id,
+                            audit_run_id=audit_run_id,
+                            operation=operation,
+                            table_name=table_name,
+                            confidence=confidence,
+                            target_id=target_id,
+                            description=description,
+                            suggested_change=suggested_change,
+                            status=status,
+                            resolved_at=resolved_at,
+                        )
+                    )
+
+                async def _apply_create(
+                    table_name: str,
+                    data: dict[str, Any],
+                ) -> tuple[bool, Optional[int], Optional[dict[str, Any]]]:
+                    if table_name == "entities":
+                        raw_name = data.get("name")
+                        raw_entity_type = data.get("entity_type")
+                        raw_description = data.get("description")
+                        if not isinstance(raw_name, str) or not raw_name.strip():
+                            return False, None, None
+                        if not isinstance(raw_entity_type, str):
+                            return False, None, None
+                        if not isinstance(raw_description, str):
+                            return False, None, None
+
+                        name = raw_name.strip()
+                        entity_type = raw_entity_type.strip().lower()
+                        if entity_type not in allowed_entity_types:
+                            logger.warning("Skipping entity create with invalid entity_type: %s", data)
+                            return False, None, None
+
+                        entity_insert_stmt = pg_insert(Entity).values(
+                            game_id=game_id,
+                            entity_type=entity_type,
+                            name=name,
+                            description=raw_description,
+                        )
+                        entity_upsert_stmt = entity_insert_stmt.on_conflict_do_update(
+                            constraint="uq_entities_game_entity_type_name",
+                            set_={
+                                "description": entity_insert_stmt.excluded.description,
+                                "updated_at": sa.func.now(),
+                            },
+                        ).returning(Entity.id)
+                        entity_id = (await session.execute(entity_upsert_stmt)).scalar_one()
+                        await session.execute(
+                            pg_insert(notes_entities_table)
+                            .values(note_id=audit_note_id, entity_id=entity_id)
+                            .on_conflict_do_nothing()
+                        )
+                        _track_embedding_id("entities", entity_id)
+                        after = await _load_snapshot("entities", entity_id)
+                        return after is not None, entity_id, after
+
+                    if table_name == "quests":
+                        raw_name = data.get("name")
+                        raw_description = data.get("description")
+                        raw_status = data.get("status", "active")
+                        if not isinstance(raw_name, str) or not raw_name.strip():
+                            return False, None, None
+                        if not isinstance(raw_description, str):
+                            return False, None, None
+                        if not isinstance(raw_status, str):
+                            return False, None, None
+
+                        status = raw_status.strip().lower()
+                        if status not in {"active", "completed"}:
+                            return False, None, None
+
+                        quest_giver_entity_id = await _resolve_entity_reference(
+                            raw_entity_id=data.get("quest_giver_entity_id"),
+                            raw_entity_name=data.get("entity_name"),
+                        )
+
+                        quest_insert_stmt = pg_insert(Quest).values(
+                            game_id=game_id,
+                            name=raw_name.strip(),
+                            description=raw_description,
+                            status=status,
+                            quest_giver_entity_id=quest_giver_entity_id,
+                            note_ids=[audit_note_id],
+                            is_deleted=False,
+                            deleted_at=None,
+                            deleted_reason=None,
+                        )
+                        quest_upsert_stmt = quest_insert_stmt.on_conflict_do_update(
+                            constraint="uq_quests_game_name",
+                            set_={
+                                "description": quest_insert_stmt.excluded.description,
+                                "status": quest_insert_stmt.excluded.status,
+                                "quest_giver_entity_id": sa.func.coalesce(
+                                    quest_insert_stmt.excluded.quest_giver_entity_id,
+                                    Quest.quest_giver_entity_id,
+                                ),
+                                "note_ids": sa.func.array_append(Quest.note_ids, audit_note_id),
+                                "updated_at": sa.func.now(),
+                                "is_deleted": False,
+                                "deleted_at": None,
+                                "deleted_reason": None,
+                            },
+                        ).returning(Quest.id)
+                        quest_id = (await session.execute(quest_upsert_stmt)).scalar_one()
+                        _track_embedding_id("quests", quest_id)
+                        after = await _load_snapshot("quests", quest_id)
+                        return after is not None, quest_id, after
+
+                    if table_name == "threads":
+                        raw_text = data.get("text")
+                        if not isinstance(raw_text, str) or not raw_text.strip():
+                            return False, None, None
+
+                        safe_quest_id = await _resolve_quest_reference(
+                            raw_quest_id=data.get("quest_id"),
+                            raw_quest_name=data.get("quest_name"),
+                        )
+                        thread = Thread(
+                            game_id=game_id,
+                            text=raw_text,
+                            quest_id=safe_quest_id,
+                            opened_by_note_id=audit_note_id,
+                        )
+                        session.add(thread)
+                        await session.flush()
+                        thread_id = thread.id
+                        if thread_id is None:
+                            return False, None, None
+                        _track_embedding_id("threads", thread_id)
+                        after = await _load_snapshot("threads", thread_id)
+                        return after is not None, thread_id, after
+
+                    if table_name == "loot":
+                        raw_item_name = data.get("item_name")
+                        raw_acquired_by = data.get("acquired_by")
+                        if not isinstance(raw_item_name, str) or not raw_item_name.strip():
+                            return False, None, None
+                        if not isinstance(raw_acquired_by, str) or not raw_acquired_by.strip():
+                            return False, None, None
+
+                        safe_quest_id = await _resolve_quest_reference(
+                            raw_quest_id=data.get("quest_id"),
+                            raw_quest_name=data.get("quest_name"),
+                        )
+                        loot_insert_stmt = pg_insert(Loot).values(
+                            game_id=game_id,
+                            item_name=raw_item_name.strip(),
+                            acquired_by=raw_acquired_by.strip(),
+                            quest_id=safe_quest_id,
+                        )
+                        loot_upsert_stmt = loot_insert_stmt.on_conflict_do_update(
+                            constraint="uq_loot_game_item_acquirer",
+                            set_={
+                                "quest_id": sa.func.coalesce(
+                                    loot_insert_stmt.excluded.quest_id,
+                                    Loot.quest_id,
+                                ),
+                            },
+                        ).returning(Loot.id)
+                        loot_id = (await session.execute(loot_upsert_stmt)).scalar_one()
+                        await session.execute(
+                            pg_insert(notes_loot_table)
+                            .values(note_id=audit_note_id, loot_id=loot_id)
+                            .on_conflict_do_nothing()
+                        )
+                        _track_embedding_id("loot", loot_id)
+                        after = await _load_snapshot("loot", loot_id)
+                        return after is not None, loot_id, after
+
+                    if table_name == "decisions":
+                        raw_decision = data.get("decision")
+                        raw_made_by = data.get("made_by")
+                        if not isinstance(raw_decision, str) or not isinstance(raw_made_by, str):
+                            return False, None, None
+                        decision = Decision(
+                            game_id=game_id,
+                            note_id=audit_note_id,
+                            decision=raw_decision,
+                            made_by=raw_made_by,
+                        )
+                        session.add(decision)
+                        await session.flush()
+                        decision_id = decision.id
+                        if decision_id is None:
+                            return False, None, None
+                        _track_embedding_id("decisions", decision_id)
+                        after = await _load_snapshot("decisions", decision_id)
+                        return after is not None, decision_id, after
+
+                    if table_name == "important_quotes":
+                        raw_text = data.get("text")
+                        if not isinstance(raw_text, str) or not raw_text.strip():
+                            return False, None, None
+
+                        safe_transcript_id: Optional[int] = None
+                        raw_transcript_id = data.get("transcript_id")
+                        if isinstance(raw_transcript_id, int):
+                            transcript_exists = await session.execute(
+                                sa.select(Transcript.id).where(
+                                    Transcript.id == raw_transcript_id,
+                                    Transcript.game_id == game_id,
+                                )
+                            )
+                            if transcript_exists.scalar_one_or_none() is not None:
+                                safe_transcript_id = raw_transcript_id
+
+                        quote = ImportantQuote(
+                            game_id=game_id,
+                            note_id=audit_note_id,
+                            transcript_id=safe_transcript_id,
+                            text=raw_text,
+                            speaker=(
+                                data.get("speaker")
+                                if isinstance(data.get("speaker"), str) or data.get("speaker") is None
+                                else None
+                            ),
+                        )
+                        session.add(quote)
+                        await session.flush()
+                        quote_id = quote.id
+                        if quote_id is None:
+                            return False, None, None
+                        after = await _load_snapshot("important_quotes", quote_id)
+                        return after is not None, quote_id, after
+
+                    if table_name == "combat_updates":
+                        raw_encounter = data.get("encounter")
+                        raw_outcome = data.get("outcome")
+                        if not isinstance(raw_encounter, str) or not isinstance(raw_outcome, str):
+                            return False, None, None
+                        combat = CombatUpdate(
+                            game_id=game_id,
+                            note_id=audit_note_id,
+                            encounter=raw_encounter,
+                            outcome=raw_outcome,
+                        )
+                        session.add(combat)
+                        await session.flush()
+                        combat_id = combat.id
+                        if combat_id is None:
+                            return False, None, None
+                        _track_embedding_id("combat_updates", combat_id)
+                        after = await _load_snapshot("combat_updates", combat_id)
+                        return after is not None, combat_id, after
+
+                    if table_name == "events":
+                        raw_text = data.get("text")
+                        if not isinstance(raw_text, str) or not raw_text.strip():
+                            return False, None, None
+                        text = raw_text.strip()
+                        event_insert_stmt = (
+                            pg_insert(Event)
+                            .values(game_id=game_id, text=text)
+                            .on_conflict_do_nothing(constraint="uq_events_game_text")
+                            .returning(Event.id)
+                        )
+                        event_id = (await session.execute(event_insert_stmt)).scalar_one_or_none()
+                        if event_id is None:
+                            existing = await session.execute(
+                                sa.select(Event.id).where(Event.game_id == game_id, Event.text == text)
+                            )
+                            event_id = existing.scalar_one_or_none()
+                        if event_id is None:
+                            return False, None, None
+                        await session.execute(
+                            pg_insert(notes_events_table)
+                            .values(note_id=audit_note_id, event_id=event_id)
+                            .on_conflict_do_nothing()
+                        )
+                        _track_embedding_id("events", event_id)
+                        after = await _load_snapshot("events", event_id)
+                        return after is not None, event_id, after
+
+                    return False, None, None
+
+                async def _apply_update(
+                    table_name: str,
+                    record_id: int,
+                    changes: dict[str, Any],
+                    before_snapshot: dict[str, Any],
+                ) -> bool:
+                    if table_name == "entities":
+                        entity_values: dict[str, Any] = {}
+                        if isinstance(changes.get("name"), str) and changes["name"].strip():
+                            entity_values["name"] = changes["name"].strip()
+                        if isinstance(changes.get("entity_type"), str) and changes["entity_type"].strip():
+                            candidate_type = changes["entity_type"].strip().lower()
+                            if candidate_type not in allowed_entity_types:
+                                return False
+                            entity_values["entity_type"] = candidate_type
+                        if isinstance(changes.get("description"), str):
+                            entity_values["description"] = changes["description"]
+                        if not entity_values:
+                            return False
+
+                        next_name = entity_values.get("name", before_snapshot.get("name"))
+                        next_type = entity_values.get("entity_type", before_snapshot.get("entity_type"))
+                        collision = await session.execute(
+                            sa.select(Entity.id)
+                            .where(
+                                Entity.game_id == game_id,
+                                Entity.id != record_id,
+                                Entity.name == next_name,
+                                Entity.entity_type == next_type,
+                            )
+                            .limit(1)
+                        )
+                        if collision.scalar_one_or_none() is not None:
+                            logger.warning(
+                                "Skipping entity update due to uniqueness collision: game_id=%d entity_id=%d",
+                                game_id,
+                                record_id,
+                            )
+                            return False
+
+                        entity_values["updated_at"] = sa.func.now()
+                        result = await session.execute(
+                            sa.update(Entity)
+                            .where(Entity.id == record_id, Entity.game_id == game_id)
+                            .values(**entity_values)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("entities", record_id)
+                            return True
+                        return False
+
+                    if table_name == "quests":
+                        quest_values: dict[str, Any] = {
+                            "note_ids": sa.func.array_append(Quest.note_ids, audit_note_id),
+                            "updated_at": sa.func.now(),
+                        }
+                        if isinstance(changes.get("name"), str) and changes["name"].strip():
+                            next_name = changes["name"].strip()
+                            collision = await session.execute(
+                                sa.select(Quest.id)
+                                .where(
+                                    Quest.game_id == game_id,
+                                    Quest.id != record_id,
+                                    Quest.name == next_name,
+                                )
+                                .limit(1)
+                            )
+                            if collision.scalar_one_or_none() is not None:
+                                logger.warning(
+                                    "Skipping quest update due to uniqueness collision: game_id=%d quest_id=%d",
+                                    game_id,
+                                    record_id,
+                                )
+                                return False
+                            quest_values["name"] = next_name
+
+                        if isinstance(changes.get("description"), str):
+                            new_description = changes["description"]
+                            old_description = before_snapshot.get("description")
+                            if isinstance(old_description, str) and old_description != new_description:
+                                session.add(
+                                    QuestDescriptionHistory(
+                                        quest_id=record_id,
+                                        description=old_description,
+                                        note_id=audit_note_id,
+                                    )
+                                )
+                            quest_values["description"] = new_description
+
+                        if isinstance(changes.get("status"), str):
+                            next_status = changes["status"].strip().lower()
+                            if next_status in {"active", "completed"}:
+                                quest_values["status"] = next_status
+
+                        if "quest_giver_entity_id" in changes:
+                            raw_entity_id = changes.get("quest_giver_entity_id")
+                            if raw_entity_id is None:
+                                quest_values["quest_giver_entity_id"] = None
+                            elif isinstance(raw_entity_id, int):
+                                entity_exists = await session.execute(
+                                    sa.select(Entity.id).where(
+                                        Entity.id == raw_entity_id,
+                                        Entity.game_id == game_id,
+                                    )
+                                )
+                                if entity_exists.scalar_one_or_none() is not None:
+                                    quest_values["quest_giver_entity_id"] = raw_entity_id
+
+                        result = await session.execute(
+                            sa.update(Quest)
+                            .where(
+                                Quest.id == record_id,
+                                Quest.game_id == game_id,
+                                Quest.is_deleted == False,  # noqa: E712
+                            )
+                            .values(**quest_values)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("quests", record_id)
+                            return True
+                        return False
+
+                    if table_name == "threads":
+                        if changes.get("is_resolved") is False:
+                            logger.warning(
+                                "Skipping thread update that attempts reopening (is_resolved=false): "
+                                "game_id=%d thread_id=%d",
+                                game_id,
+                                record_id,
+                            )
+                            return False
+
+                        thread_values: dict[str, Any] = {}
+                        if isinstance(changes.get("text"), str):
+                            thread_values["text"] = changes["text"]
+                        if isinstance(changes.get("resolution"), str):
+                            thread_values["resolution"] = changes["resolution"]
+                        if "quest_id" in changes:
+                            raw_quest_id = changes.get("quest_id")
+                            if raw_quest_id is None:
+                                thread_values["quest_id"] = None
+                            elif isinstance(raw_quest_id, int):
+                                safe_quest_id = await _resolve_quest_reference(
+                                    raw_quest_id=raw_quest_id,
+                                    raw_quest_name=None,
+                                )
+                                if safe_quest_id is not None:
+                                    thread_values["quest_id"] = safe_quest_id
+                        if changes.get("is_resolved") is True:
+                            thread_values["is_resolved"] = True
+                            thread_values["resolved_by_note_id"] = audit_note_id
+                            thread_values["resolved_at"] = sa.func.now()
+                        if not thread_values:
+                            return False
+
+                        result = await session.execute(
+                            sa.update(Thread)
+                            .where(
+                                Thread.id == record_id,
+                                Thread.game_id == game_id,
+                                Thread.is_deleted == False,  # noqa: E712
+                            )
+                            .values(**thread_values)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("threads", record_id)
+                            return True
+                        return False
+
+                    if table_name == "events":
+                        if not isinstance(changes.get("text"), str):
+                            return False
+                        next_text = changes["text"]
+                        collision = await session.execute(
+                            sa.select(Event.id)
+                            .where(
+                                Event.game_id == game_id,
+                                Event.id != record_id,
+                                Event.text == next_text,
+                            )
+                            .limit(1)
+                        )
+                        if collision.scalar_one_or_none() is not None:
+                            logger.warning(
+                                "Skipping event update due to uniqueness collision: game_id=%d event_id=%d",
+                                game_id,
+                                record_id,
+                            )
+                            return False
+                        result = await session.execute(
+                            sa.update(Event)
+                            .where(Event.id == record_id, Event.game_id == game_id)
+                            .values(text=next_text)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("events", record_id)
+                            return True
+                        return False
+
+                    if table_name == "decisions":
+                        decision_values: dict[str, Any] = {}
+                        if isinstance(changes.get("decision"), str):
+                            decision_values["decision"] = changes["decision"]
+                        if isinstance(changes.get("made_by"), str):
+                            decision_values["made_by"] = changes["made_by"]
+                        if not decision_values:
+                            return False
+                        result = await session.execute(
+                            sa.update(Decision)
+                            .where(Decision.id == record_id, Decision.game_id == game_id)
+                            .values(**decision_values)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("decisions", record_id)
+                            return True
+                        return False
+
+                    if table_name == "loot":
+                        loot_values: dict[str, Any] = {}
+                        if isinstance(changes.get("item_name"), str) and changes["item_name"].strip():
+                            loot_values["item_name"] = changes["item_name"].strip()
+                        if isinstance(changes.get("acquired_by"), str) and changes["acquired_by"].strip():
+                            loot_values["acquired_by"] = changes["acquired_by"].strip()
+                        if "quest_id" in changes:
+                            raw_quest_id = changes.get("quest_id")
+                            if raw_quest_id is None:
+                                loot_values["quest_id"] = None
+                            elif isinstance(raw_quest_id, int):
+                                safe_quest_id = await _resolve_quest_reference(
+                                    raw_quest_id=raw_quest_id,
+                                    raw_quest_name=None,
+                                )
+                                if safe_quest_id is not None:
+                                    loot_values["quest_id"] = safe_quest_id
+                        if not loot_values:
+                            return False
+
+                        next_item_name = loot_values.get("item_name", before_snapshot.get("item_name"))
+                        next_acquired_by = loot_values.get("acquired_by", before_snapshot.get("acquired_by"))
+                        collision = await session.execute(
+                            sa.select(Loot.id)
+                            .where(
+                                Loot.game_id == game_id,
+                                Loot.id != record_id,
+                                Loot.item_name == next_item_name,
+                                Loot.acquired_by == next_acquired_by,
+                            )
+                            .limit(1)
+                        )
+                        if collision.scalar_one_or_none() is not None:
+                            logger.warning(
+                                "Skipping loot update due to uniqueness collision: game_id=%d loot_id=%d",
+                                game_id,
+                                record_id,
+                            )
+                            return False
+
+                        result = await session.execute(
+                            sa.update(Loot)
+                            .where(Loot.id == record_id, Loot.game_id == game_id)
+                            .values(**loot_values)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("loot", record_id)
+                            return True
+                        return False
+
+                    if table_name == "important_quotes":
+                        quote_values: dict[str, Any] = {}
+                        if isinstance(changes.get("text"), str):
+                            quote_values["text"] = changes["text"]
+                        if "speaker" in changes and (
+                            changes.get("speaker") is None or isinstance(changes.get("speaker"), str)
+                        ):
+                            quote_values["speaker"] = changes.get("speaker")
+                        if "transcript_id" in changes:
+                            raw_tid = changes.get("transcript_id")
+                            if raw_tid is None:
+                                quote_values["transcript_id"] = None
+                            elif isinstance(raw_tid, int):
+                                transcript_exists = await session.execute(
+                                    sa.select(Transcript.id).where(
+                                        Transcript.id == raw_tid,
+                                        Transcript.game_id == game_id,
+                                    )
+                                )
+                                if transcript_exists.scalar_one_or_none() is not None:
+                                    quote_values["transcript_id"] = raw_tid
+                        if not quote_values:
+                            return False
+                        result = await session.execute(
+                            sa.update(ImportantQuote)
+                            .where(ImportantQuote.id == record_id, ImportantQuote.game_id == game_id)
+                            .values(**quote_values)
+                        )
+                        return _affected_rows(result) > 0
+
+                    if table_name == "combat_updates":
+                        combat_values: dict[str, Any] = {}
+                        if isinstance(changes.get("encounter"), str):
+                            combat_values["encounter"] = changes["encounter"]
+                        if isinstance(changes.get("outcome"), str):
+                            combat_values["outcome"] = changes["outcome"]
+                        if not combat_values:
+                            return False
+                        result = await session.execute(
+                            sa.update(CombatUpdate)
+                            .where(CombatUpdate.id == record_id, CombatUpdate.game_id == game_id)
+                            .values(**combat_values)
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("combat_updates", record_id)
+                            return True
+                        return False
+
+                    return False
+
+                async def _apply_delete(table_name: str, record_id: int, reason: str) -> bool:
+                    if table_name == "quests":
+                        existing = await session.execute(
+                            sa.select(Quest.is_deleted).where(Quest.id == record_id, Quest.game_id == game_id)
+                        )
+                        quest_deleted = existing.scalar_one_or_none()
+                        if quest_deleted is None:
+                            return False
+                        if quest_deleted:
+                            return True
+                        result = await session.execute(
+                            sa.update(Quest)
+                            .where(
+                                Quest.id == record_id,
+                                Quest.game_id == game_id,
+                                Quest.is_deleted == False,  # noqa: E712
+                            )
+                            .values(
+                                is_deleted=True,
+                                deleted_at=sa.func.now(),
+                                deleted_reason=reason,
+                                updated_at=sa.func.now(),
+                            )
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("quests", record_id)
+                            return True
+                        return False
+
+                    if table_name == "threads":
+                        existing = await session.execute(
+                            sa.select(Thread.is_deleted).where(Thread.id == record_id, Thread.game_id == game_id)
+                        )
+                        thread_deleted = existing.scalar_one_or_none()
+                        if thread_deleted is None:
+                            return False
+                        if thread_deleted:
+                            return True
+                        result = await session.execute(
+                            sa.update(Thread)
+                            .where(
+                                Thread.id == record_id,
+                                Thread.game_id == game_id,
+                                Thread.is_deleted == False,  # noqa: E712
+                            )
+                            .values(
+                                is_deleted=True,
+                                deleted_at=sa.func.now(),
+                                deleted_reason=reason,
+                            )
+                        )
+                        if _affected_rows(result) > 0:
+                            _track_embedding_id("threads", record_id)
+                            return True
+                        return False
+
+                    if table_name == "entities":
+                        entity = await session.get(Entity, record_id)
+                        if entity is None or entity.game_id != game_id:
+                            return False
+                        await session.execute(
+                            sa.update(Quest)
+                            .where(Quest.game_id == game_id, Quest.quest_giver_entity_id == record_id)
+                            .values(quest_giver_entity_id=None, updated_at=sa.func.now())
+                        )
+                        await session.execute(
+                            sa.delete(notes_entities_table).where(notes_entities_table.c.entity_id == record_id)
+                        )
+                        result = await session.execute(
+                            sa.delete(Entity).where(Entity.id == record_id, Entity.game_id == game_id)
+                        )
+                        return _affected_rows(result) > 0
+
+                    if table_name == "events":
+                        await session.execute(
+                            sa.delete(notes_events_table).where(notes_events_table.c.event_id == record_id)
+                        )
+                        result = await session.execute(
+                            sa.delete(Event).where(Event.id == record_id, Event.game_id == game_id)
+                        )
+                        return _affected_rows(result) > 0
+
+                    if table_name == "loot":
+                        await session.execute(
+                            sa.delete(notes_loot_table).where(notes_loot_table.c.loot_id == record_id)
+                        )
+                        result = await session.execute(
+                            sa.delete(Loot).where(Loot.id == record_id, Loot.game_id == game_id)
+                        )
+                        return _affected_rows(result) > 0
+
+                    if table_name == "decisions":
+                        result = await session.execute(
+                            sa.delete(Decision).where(Decision.id == record_id, Decision.game_id == game_id)
+                        )
+                        return _affected_rows(result) > 0
+
+                    if table_name == "important_quotes":
+                        result = await session.execute(
+                            sa.delete(ImportantQuote)
+                            .where(ImportantQuote.id == record_id, ImportantQuote.game_id == game_id)
+                        )
+                        return _affected_rows(result) > 0
+
+                    if table_name == "combat_updates":
+                        result = await session.execute(
+                            sa.delete(CombatUpdate)
+                            .where(CombatUpdate.id == record_id, CombatUpdate.game_id == game_id)
+                        )
+                        return _affected_rows(result) > 0
+
+                    return False
+
+                async def _apply_merge(table_name: str, canonical_id: int, duplicate_id: int) -> bool:
+                    if canonical_id == duplicate_id:
+                        return True
+
+                    if table_name == "entities":
+                        canonical_game_id = (await session.execute(
+                            sa.select(Entity.game_id).where(Entity.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(Entity.game_id).where(Entity.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+
+                        duplicate_note_rows = await session.execute(
+                            sa.select(notes_entities_table.c.note_id)
+                            .where(notes_entities_table.c.entity_id == duplicate_id)
+                        )
+                        for note_id in [row[0] for row in duplicate_note_rows.all()]:
+                            await session.execute(
+                                pg_insert(notes_entities_table)
+                                .values(note_id=note_id, entity_id=canonical_id)
+                                .on_conflict_do_nothing()
+                            )
+
+                        await session.execute(
+                            sa.update(Quest)
+                            .where(Quest.game_id == game_id, Quest.quest_giver_entity_id == duplicate_id)
+                            .values(quest_giver_entity_id=canonical_id, updated_at=sa.func.now())
+                        )
+                        await session.execute(
+                            sa.delete(notes_entities_table).where(notes_entities_table.c.entity_id == duplicate_id)
+                        )
+                        deleted = await session.execute(
+                            sa.delete(Entity).where(Entity.id == duplicate_id, Entity.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("entities", canonical_id)
+                            return True
+                        return False
+
+                    if table_name == "events":
+                        canonical_game_id = (await session.execute(
+                            sa.select(Event.game_id).where(Event.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(Event.game_id).where(Event.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+
+                        duplicate_note_rows = await session.execute(
+                            sa.select(notes_events_table.c.note_id)
+                            .where(notes_events_table.c.event_id == duplicate_id)
+                        )
+                        for note_id in [row[0] for row in duplicate_note_rows.all()]:
+                            await session.execute(
+                                pg_insert(notes_events_table)
+                                .values(note_id=note_id, event_id=canonical_id)
+                                .on_conflict_do_nothing()
+                            )
+
+                        await session.execute(
+                            sa.delete(notes_events_table).where(notes_events_table.c.event_id == duplicate_id)
+                        )
+                        deleted = await session.execute(
+                            sa.delete(Event).where(Event.id == duplicate_id, Event.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("events", canonical_id)
+                            return True
+                        return False
+
+                    if table_name == "loot":
+                        canonical_game_id = (await session.execute(
+                            sa.select(Loot.game_id).where(Loot.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(Loot.game_id).where(Loot.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+
+                        duplicate_note_rows = await session.execute(
+                            sa.select(notes_loot_table.c.note_id)
+                            .where(notes_loot_table.c.loot_id == duplicate_id)
+                        )
+                        for note_id in [row[0] for row in duplicate_note_rows.all()]:
+                            await session.execute(
+                                pg_insert(notes_loot_table)
+                                .values(note_id=note_id, loot_id=canonical_id)
+                                .on_conflict_do_nothing()
+                            )
+
+                        await session.execute(
+                            sa.delete(notes_loot_table).where(notes_loot_table.c.loot_id == duplicate_id)
+                        )
+                        deleted = await session.execute(
+                            sa.delete(Loot).where(Loot.id == duplicate_id, Loot.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("loot", canonical_id)
+                            return True
+                        return False
+
+                    if table_name == "quests":
+                        canonical_row = (await session.execute(
+                            sa.select(Quest.game_id, Quest.note_ids).where(Quest.id == canonical_id)
+                        )).one_or_none()
+                        duplicate_row = (await session.execute(
+                            sa.select(Quest.game_id, Quest.note_ids).where(Quest.id == duplicate_id)
+                        )).one_or_none()
+                        if canonical_row is None or duplicate_row is None:
+                            return False
+                        canonical_game_id, canonical_note_ids = canonical_row
+                        duplicate_game_id, duplicate_note_ids = duplicate_row
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+
+                        merged_note_ids: list[int] = []
+                        seen_note_ids: set[int] = set()
+                        for candidate_id in [*(canonical_note_ids or []), *(duplicate_note_ids or [])]:
+                            if isinstance(candidate_id, int) and candidate_id not in seen_note_ids:
+                                seen_note_ids.add(candidate_id)
+                                merged_note_ids.append(candidate_id)
+
+                        await session.execute(
+                            sa.update(Quest)
+                            .where(Quest.id == canonical_id, Quest.game_id == game_id)
+                            .values(note_ids=merged_note_ids, updated_at=sa.func.now())
+                        )
+                        await session.execute(
+                            sa.update(Thread)
+                            .where(Thread.game_id == game_id, Thread.quest_id == duplicate_id)
+                            .values(quest_id=canonical_id)
+                        )
+                        await session.execute(
+                            sa.update(Loot)
+                            .where(Loot.game_id == game_id, Loot.quest_id == duplicate_id)
+                            .values(quest_id=canonical_id)
+                        )
+                        deleted = await session.execute(
+                            sa.delete(Quest).where(Quest.id == duplicate_id, Quest.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("quests", canonical_id)
+                            return True
+                        return False
+
+                    if table_name == "threads":
+                        canonical_game_id = (await session.execute(
+                            sa.select(Thread.game_id).where(Thread.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(Thread.game_id).where(Thread.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+                        deleted = await session.execute(
+                            sa.delete(Thread).where(Thread.id == duplicate_id, Thread.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("threads", canonical_id)
+                            return True
+                        return False
+
+                    if table_name == "decisions":
+                        canonical_game_id = (await session.execute(
+                            sa.select(Decision.game_id).where(Decision.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(Decision.game_id).where(Decision.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+                        deleted = await session.execute(
+                            sa.delete(Decision).where(Decision.id == duplicate_id, Decision.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("decisions", canonical_id)
+                            return True
+                        return False
+
+                    if table_name == "important_quotes":
+                        canonical_game_id = (await session.execute(
+                            sa.select(ImportantQuote.game_id).where(ImportantQuote.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(ImportantQuote.game_id).where(ImportantQuote.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+                        deleted = await session.execute(
+                            sa.delete(ImportantQuote)
+                            .where(ImportantQuote.id == duplicate_id, ImportantQuote.game_id == game_id)
+                        )
+                        return _affected_rows(deleted) > 0
+
+                    if table_name == "combat_updates":
+                        canonical_game_id = (await session.execute(
+                            sa.select(CombatUpdate.game_id).where(CombatUpdate.id == canonical_id)
+                        )).scalar_one_or_none()
+                        duplicate_game_id = (await session.execute(
+                            sa.select(CombatUpdate.game_id).where(CombatUpdate.id == duplicate_id)
+                        )).scalar_one_or_none()
+                        if canonical_game_id != game_id or duplicate_game_id != game_id:
+                            return False
+                        deleted = await session.execute(
+                            sa.delete(CombatUpdate)
+                            .where(CombatUpdate.id == duplicate_id, CombatUpdate.game_id == game_id)
+                        )
+                        if _affected_rows(deleted) > 0:
+                            _track_embedding_id("combat_updates", canonical_id)
+                            return True
+                        return False
+
+                    return False
+
                 run_result = await session.execute(
                     sa.select(AuditRun)
                     .where(AuditRun.id == audit_run_id)
@@ -1606,546 +4184,262 @@ async def write_audit_pipeline_result(
                 if run.status != "running":
                     raise ValueError(f"audit_run_id={audit_run_id} is not running (status={run.status})")
 
-                # Phase A: corrections
-                for upd in entity_description_updates:
-                    entity_id = upd.get("entity_id")
-                    description = upd.get("description")
-                    if not isinstance(entity_id, int) or not isinstance(description, str):
-                        logger.warning("Skipping malformed entity_description_update: %s", upd)
-                        continue
-                    result = await session.execute(
-                        sa.update(Entity)
-                        .where(Entity.id == entity_id, Entity.game_id == game_id)
-                        .values(description=description, updated_at=sa.func.now())
+                # Phase A: creates (three ordered passes with flushes and name maps)
+                for create_op in table_changesets["entities"]["creates"]:
+                    confidence = _normalize_confidence(create_op, context="entities.create")
+                    description = _normalize_description(
+                        create_op,
+                        fallback="Create entity from audit output",
                     )
-                    if _affected_rows(result) > 0:
-                        entity_ids_to_embed.add(entity_id)
+                    data = _coerce_dict(create_op.get("data"), fallback_label="entity create data")
+                    status = "pending"
+                    after_snapshot = None
 
-                for upd in quest_description_updates:
-                    quest_id = upd.get("quest_id")
-                    description = upd.get("description")
-                    if not isinstance(quest_id, int) or not isinstance(description, str):
-                        logger.warning("Skipping malformed quest_description_update: %s", upd)
-                        continue
-                    prev = await session.execute(
-                        sa.select(Quest.description)
-                        .where(
-                            Quest.id == quest_id,
-                            Quest.game_id == game_id,
-                            Quest.is_deleted == False,  # noqa: E712
-                        )
-                    )
-                    old_description = prev.scalar_one_or_none()
-                    if old_description is None:
-                        continue
-                    session.add(
-                        QuestDescriptionHistory(
-                            quest_id=quest_id,
-                            description=old_description,
-                            note_id=audit_note_id,
-                        )
-                    )
-                    result = await session.execute(
-                        sa.update(Quest)
-                        .where(Quest.id == quest_id, Quest.game_id == game_id)
-                        .values(
-                            description=description,
-                            note_ids=sa.func.array_append(Quest.note_ids, audit_note_id),
-                            updated_at=sa.func.now(),
-                        )
-                    )
-                    if _affected_rows(result) > 0:
-                        quest_ids_to_embed.add(quest_id)
+                    if confidence == "high":
+                        applied, created_id, after_snapshot = await _apply_create("entities", data)
+                        if applied and created_id is not None:
+                            status = "applied"
+                            normalized_name = _normalize_name(data.get("name"))
+                            if normalized_name is not None:
+                                entity_name_to_id[normalized_name] = created_id
 
-                for upd in quest_status_updates:
-                    quest_id = upd.get("quest_id")
-                    status = upd.get("status")
-                    if not isinstance(quest_id, int) or status not in {"active", "completed"}:
-                        logger.warning("Skipping malformed quest_status_update: %s", upd)
-                        continue
-                    result = await session.execute(
-                        sa.update(Quest)
-                        .where(
-                            Quest.id == quest_id,
-                            Quest.game_id == game_id,
-                            Quest.is_deleted == False,  # noqa: E712
-                        )
-                        .values(
-                            status=status,
-                            note_ids=sa.func.array_append(Quest.note_ids, audit_note_id),
-                            updated_at=sa.func.now(),
-                        )
-                    )
-                    if _affected_rows(result) > 0:
-                        quest_ids_to_embed.add(quest_id)
-
-                for upd in thread_resolutions:
-                    thread_id = upd.get("thread_id")
-                    resolution = upd.get("resolution")
-                    if not isinstance(thread_id, int) or not isinstance(resolution, str):
-                        logger.warning("Skipping malformed thread_resolution: %s", upd)
-                        continue
-                    result = await session.execute(
-                        sa.update(Thread)
-                        .where(
-                            Thread.id == thread_id,
-                            Thread.game_id == game_id,
-                            Thread.is_deleted == False,  # noqa: E712
-                            Thread.is_resolved == False,  # noqa: E712
-                        )
-                        .values(
-                            is_resolved=True,
-                            resolved_at=sa.func.now(),
-                            resolved_by_note_id=audit_note_id,
-                            resolution=resolution,
-                        )
-                    )
-                    if _affected_rows(result) > 0:
-                        thread_ids_to_embed.add(thread_id)
-                    else:
-                        logger.warning(
-                            "Skipping thread_resolution with no updatable row: game_id=%d thread_id=%d",
-                            game_id,
-                            thread_id,
-                        )
-
-                for upd in thread_text_updates:
-                    thread_id = upd.get("thread_id")
-                    text = upd.get("text")
-                    if not isinstance(thread_id, int) or not isinstance(text, str):
-                        logger.warning("Skipping malformed thread_text_update: %s", upd)
-                        continue
-                    result = await session.execute(
-                        sa.update(Thread)
-                        .where(
-                            Thread.id == thread_id,
-                            Thread.game_id == game_id,
-                            Thread.is_deleted == False,  # noqa: E712
-                        )
-                        .values(text=text)
-                    )
-                    if _affected_rows(result) > 0:
-                        thread_ids_to_embed.add(thread_id)
-
-                for upd in event_text_updates:
-                    event_id = upd.get("event_id")
-                    text = upd.get("text")
-                    if not isinstance(event_id, int) or not isinstance(text, str):
-                        logger.warning("Skipping malformed event_text_update: %s", upd)
-                        continue
-                    collision = await session.execute(
-                        sa.select(Event.id)
-                        .where(
-                            Event.game_id == game_id,
-                            Event.id != event_id,
-                            Event.text == text,
-                        )
-                        .limit(1)
-                    )
-                    if collision.scalar_one_or_none() is not None:
-                        logger.warning(
-                            "Skipping event_text_update due to uniqueness collision: game_id=%d event_id=%d",
-                            game_id,
-                            event_id,
-                        )
-                        continue
-                    result = await session.execute(
-                        sa.update(Event)
-                        .where(Event.id == event_id, Event.game_id == game_id)
-                        .values(text=text)
-                    )
-                    if _affected_rows(result) > 0:
-                        event_ids_to_embed.add(event_id)
-
-                for upd in decision_corrections:
-                    decision_id = upd.get("decision_id")
-                    decision_text = upd.get("decision")
-                    made_by = upd.get("made_by")
-                    if not isinstance(decision_id, int) or not isinstance(decision_text, str):
-                        logger.warning("Skipping malformed decision_correction: %s", upd)
-                        continue
-                    decision_exists = await session.execute(
-                        sa.select(Decision.id).where(
-                            Decision.id == decision_id,
-                            Decision.game_id == game_id,
-                        )
-                    )
-                    if decision_exists.scalar_one_or_none() is None:
-                        logger.warning(
-                            "Skipping decision_correction for missing decision: game_id=%d decision_id=%d",
-                            game_id,
-                            decision_id,
-                        )
-                        continue
-                    decision_values: dict[str, Any] = {"decision": decision_text}
-                    if isinstance(made_by, str) and made_by:
-                        decision_values["made_by"] = made_by
-                    result = await session.execute(
-                        sa.update(Decision)
-                        .where(Decision.id == decision_id, Decision.game_id == game_id)
-                        .values(**decision_values)
-                    )
-                    if _affected_rows(result) > 0:
-                        decision_ids_to_embed.add(decision_id)
-
-                for upd in loot_corrections:
-                    loot_id = upd.get("loot_id")
-                    if not isinstance(loot_id, int):
-                        logger.warning("Skipping malformed loot_correction: %s", upd)
-                        continue
-
-                    loot_values: dict[str, Any] = {}
-                    item_name = upd.get("item_name")
-                    acquired_by = upd.get("acquired_by")
-                    quest_id = upd.get("quest_id")
-
-                    current_row_result = await session.execute(
-                        sa.select(Loot.item_name, Loot.acquired_by)
-                        .where(Loot.id == loot_id, Loot.game_id == game_id)
-                    )
-                    current_row = current_row_result.one_or_none()
-                    if current_row is None:
-                        continue
-                    current_item_name, current_acquired_by = current_row
-
-                    if isinstance(item_name, str) and item_name:
-                        loot_values["item_name"] = item_name
-                    if isinstance(acquired_by, str) and acquired_by:
-                        loot_values["acquired_by"] = acquired_by
-                    if isinstance(quest_id, int):
-                        q_exists = await session.execute(
-                            sa.select(Quest.id).where(
-                                Quest.id == quest_id,
-                                Quest.game_id == game_id,
-                                Quest.is_deleted == False,  # noqa: E712
-                            )
-                        )
-                        if q_exists.scalar_one_or_none() is not None:
-                            loot_values["quest_id"] = quest_id
-
-                    if not loot_values:
-                        continue
-
-                    next_item_name = loot_values.get("item_name", current_item_name)
-                    next_acquired_by = loot_values.get("acquired_by", current_acquired_by)
-                    collision = await session.execute(
-                        sa.select(Loot.id)
-                        .where(
-                            Loot.game_id == game_id,
-                            Loot.id != loot_id,
-                            Loot.item_name == next_item_name,
-                            Loot.acquired_by == next_acquired_by,
-                        )
-                        .limit(1)
-                    )
-                    if collision.scalar_one_or_none() is not None:
-                        logger.warning(
-                            "Skipping loot_correction due to uniqueness collision: game_id=%d loot_id=%d",
-                            game_id,
-                            loot_id,
-                        )
-                        continue
-
-                    result = await session.execute(
-                        sa.update(Loot)
-                        .where(Loot.id == loot_id, Loot.game_id == game_id)
-                        .values(**loot_values)
-                    )
-                    if _affected_rows(result) > 0:
-                        loot_ids_to_embed.add(loot_id)
-
-                for upd in quote_corrections:
-                    quote_id = upd.get("quote_id")
-                    if not isinstance(quote_id, int):
-                        logger.warning("Skipping malformed quote_correction: %s", upd)
-                        continue
-
-                    quote_values: dict[str, Any] = {}
-                    text = upd.get("text")
-                    speaker = upd.get("speaker")
-                    transcript_id = upd.get("transcript_id")
-
-                    if isinstance(text, str) and text:
-                        quote_values["text"] = text
-                    if speaker is None or isinstance(speaker, str):
-                        quote_values["speaker"] = speaker
-                    if isinstance(transcript_id, int):
-                        transcript_result = await session.execute(
-                            sa.select(Transcript.id).where(
-                                Transcript.id == transcript_id,
-                                Transcript.game_id == game_id,
-                            )
-                        )
-                        if transcript_result.scalar_one_or_none() is not None:
-                            quote_values["transcript_id"] = transcript_id
-                    elif transcript_id is None:
-                        quote_values["transcript_id"] = None
-
-                    if not quote_values:
-                        continue
-                    await session.execute(
-                        sa.update(ImportantQuote)
-                        .where(ImportantQuote.id == quote_id, ImportantQuote.game_id == game_id)
-                        .values(**quote_values)
-                    )
-
-                # Phase B: new data
-                for item in new_entities:
-                    entity_type = item.get("entity_type")
-                    name = item.get("name")
-                    description = item.get("description")
-                    if (
-                        not isinstance(entity_type, str)
-                        or not isinstance(name, str)
-                        or not isinstance(description, str)
-                    ):
-                        logger.warning("Skipping malformed new_entity item: %s", item)
-                        continue
-                    entity_insert_stmt = pg_insert(Entity).values(
-                        game_id=game_id,
-                        entity_type=entity_type,
-                        name=name,
+                    _append_flag(
+                        operation="create",
+                        table_name="entities",
+                        confidence=confidence,
+                        target_id=None,
                         description=description,
-                    )
-                    entity_upsert_stmt = entity_insert_stmt.on_conflict_do_update(
-                        constraint="uq_entities_game_entity_type_name",
-                        set_={
-                            "description": entity_insert_stmt.excluded.description,
-                            "updated_at": sa.func.now(),
+                        suggested_change={
+                            "data": data,
+                            "_before": None,
+                            "_after": after_snapshot if status == "applied" else None,
                         },
-                    ).returning(Entity.id)
-                    entity_result = await session.execute(entity_upsert_stmt)
-                    entity_id = entity_result.scalar_one()
-                    entity_ids_to_embed.add(entity_id)
-                    await session.execute(
-                        pg_insert(notes_entities_table)
-                        .values(note_id=audit_note_id, entity_id=entity_id)
-                        .on_conflict_do_nothing()
-                    )
-
-                for item in new_events:
-                    text = item.get("text")
-                    if not isinstance(text, str) or not text:
-                        logger.warning("Skipping malformed new_event item: %s", item)
-                        continue
-                    event_stmt = (
-                        pg_insert(Event)
-                        .values(game_id=game_id, text=text)
-                        .on_conflict_do_nothing(constraint="uq_events_game_text")
-                        .returning(Event.id)
-                    )
-                    event_result = await session.execute(event_stmt)
-                    event_id = event_result.scalar_one_or_none()
-                    if event_id is None:
-                        existing = await session.execute(
-                            sa.select(Event.id).where(Event.game_id == game_id, Event.text == text)
-                        )
-                        event_id = existing.scalar_one()
-                    event_ids_to_embed.add(event_id)
-                    await session.execute(
-                        pg_insert(notes_events_table)
-                        .values(note_id=audit_note_id, event_id=event_id)
-                        .on_conflict_do_nothing()
-                    )
-
-                for item in new_decisions:
-                    decision_text = item.get("decision")
-                    made_by = item.get("made_by")
-                    if not isinstance(decision_text, str) or not isinstance(made_by, str):
-                        logger.warning("Skipping malformed new_decision item: %s", item)
-                        continue
-                    decision = Decision(
-                        game_id=game_id,
-                        note_id=audit_note_id,
-                        decision=decision_text,
-                        made_by=made_by,
-                    )
-                    session.add(decision)
-                    await session.flush()
-                    decision_ids_to_embed.add(decision.id)
-
-                for item in new_loot:
-                    item_name = item.get("item_name")
-                    acquired_by = item.get("acquired_by")
-                    quest_id_raw = item.get("quest_id")
-                    if not isinstance(item_name, str) or not isinstance(acquired_by, str):
-                        logger.warning("Skipping malformed new_loot item: %s", item)
-                        continue
-
-                    loot_quest_id: Optional[int] = None
-                    if isinstance(quest_id_raw, int):
-                        q_exists = await session.execute(
-                            sa.select(Quest.id).where(
-                                Quest.id == quest_id_raw,
-                                Quest.game_id == game_id,
-                                Quest.is_deleted == False,  # noqa: E712
-                            )
-                        )
-                        if q_exists.scalar_one_or_none() is not None:
-                            loot_quest_id = quest_id_raw
-
-                    loot_insert_stmt = pg_insert(Loot).values(
-                        game_id=game_id,
-                        item_name=item_name,
-                        acquired_by=acquired_by,
-                        quest_id=loot_quest_id,
-                    )
-                    loot_upsert_stmt = loot_insert_stmt.on_conflict_do_update(
-                        constraint="uq_loot_game_item_acquirer",
-                        set_={
-                            "quest_id": sa.func.coalesce(
-                                loot_insert_stmt.excluded.quest_id,
-                                Loot.quest_id,
-                            ),
-                        },
-                    ).returning(Loot.id)
-                    loot_result = await session.execute(loot_upsert_stmt)
-                    loot_id = loot_result.scalar_one()
-                    loot_ids_to_embed.add(loot_id)
-                    await session.execute(
-                        pg_insert(notes_loot_table)
-                        .values(note_id=audit_note_id, loot_id=loot_id)
-                        .on_conflict_do_nothing()
-                    )
-
-                for item in new_quests:
-                    name = item.get("name")
-                    description = item.get("description")
-                    status = item.get("status", "active")
-                    if (
-                        not isinstance(name, str)
-                        or not isinstance(description, str)
-                        or status not in {"active", "completed"}
-                    ):
-                        logger.warning("Skipping malformed new_quest item: %s", item)
-                        continue
-                    quest_insert_stmt = pg_insert(Quest).values(
-                        game_id=game_id,
-                        name=name,
-                        description=description,
                         status=status,
-                        note_ids=[audit_note_id],
-                        is_deleted=False,
-                        deleted_at=None,
-                        deleted_reason=None,
                     )
-                    quest_upsert_stmt = quest_insert_stmt.on_conflict_do_update(
-                        constraint="uq_quests_game_name",
-                        set_={
-                            "description": quest_insert_stmt.excluded.description,
-                            "status": quest_insert_stmt.excluded.status,
-                            "note_ids": sa.func.array_append(Quest.note_ids, audit_note_id),
-                            "updated_at": sa.func.now(),
-                            "is_deleted": False,
-                            "deleted_at": None,
-                            "deleted_reason": None,
-                        },
-                    ).returning(Quest.id)
-                    quest_result = await session.execute(quest_upsert_stmt)
-                    quest_id = quest_result.scalar_one()
-                    quest_ids_to_embed.add(quest_id)
 
-                # Explicit flush to make all quest inserts/updates visible before threads.
                 await session.flush()
 
-                for item in new_threads:
-                    text = item.get("text")
-                    quest_id_raw = item.get("quest_id")
-                    if not isinstance(text, str):
-                        logger.warning("Skipping malformed new_thread item: %s", item)
-                        continue
-                    safe_quest_id: Optional[int] = None
-                    if isinstance(quest_id_raw, int):
-                        q_exists = await session.execute(
-                            sa.select(Quest.id).where(
-                                Quest.id == quest_id_raw,
-                                Quest.game_id == game_id,
-                                Quest.is_deleted == False,  # noqa: E712
-                            )
-                        )
-                        if q_exists.scalar_one_or_none() is not None:
-                            safe_quest_id = quest_id_raw
-                        else:
-                            logger.warning(
-                                "Skipping quest link for new thread due to unknown/deleted quest_id=%s",
-                                quest_id_raw,
-                            )
-                    thread = Thread(
-                        game_id=game_id,
-                        text=text,
-                        quest_id=safe_quest_id,
-                        opened_by_note_id=audit_note_id,
+                for create_op in table_changesets["quests"]["creates"]:
+                    confidence = _normalize_confidence(create_op, context="quests.create")
+                    description = _normalize_description(
+                        create_op,
+                        fallback="Create quest from audit output",
                     )
-                    session.add(thread)
-                    await session.flush()
-                    thread_ids_to_embed.add(thread.id)
+                    data = _coerce_dict(create_op.get("data"), fallback_label="quest create data")
+                    status = "pending"
+                    after_snapshot = None
 
-                for item in new_quotes:
-                    text = item.get("text")
-                    transcript_id = item.get("transcript_id")
-                    speaker = item.get("speaker")
-                    if not isinstance(text, str):
-                        logger.warning("Skipping malformed new_quote item: %s", item)
-                        continue
-                    safe_transcript_id: Optional[int] = None
-                    if isinstance(transcript_id, int):
-                        t_exists = await session.execute(
-                            sa.select(Transcript.id).where(
-                                Transcript.id == transcript_id,
-                                Transcript.game_id == game_id,
-                            )
-                        )
-                        if t_exists.scalar_one_or_none() is not None:
-                            safe_transcript_id = transcript_id
-                    session.add(
-                        ImportantQuote(
-                            game_id=game_id,
-                            note_id=audit_note_id,
-                            transcript_id=safe_transcript_id,
-                            text=text,
-                            speaker=speaker if isinstance(speaker, str) or speaker is None else None,
-                        )
+                    if confidence == "high":
+                        applied, created_id, after_snapshot = await _apply_create("quests", data)
+                        if applied and created_id is not None:
+                            status = "applied"
+                            normalized_name = _normalize_name(data.get("name"))
+                            if normalized_name is not None:
+                                quest_name_to_id[normalized_name] = created_id
+
+                    _append_flag(
+                        operation="create",
+                        table_name="quests",
+                        confidence=confidence,
+                        target_id=None,
+                        description=description,
+                        suggested_change={
+                            "data": data,
+                            "_before": None,
+                            "_after": after_snapshot if status == "applied" else None,
+                        },
+                        status=status,
                     )
 
-                for item in new_combat:
-                    encounter = item.get("encounter")
-                    outcome = item.get("outcome")
-                    if not isinstance(encounter, str) or not isinstance(outcome, str):
-                        logger.warning("Skipping malformed new_combat item: %s", item)
-                        continue
-                    combat_row = CombatUpdate(
-                        game_id=game_id,
-                        note_id=audit_note_id,
-                        encounter=encounter,
-                        outcome=outcome,
-                    )
-                    session.add(combat_row)
-                    await session.flush()
-                    combat_ids_to_embed.add(combat_row.id)
+                await session.flush()
 
-                # Phase C: flags + finalize run
-                for flag_payload in audit_flags:
-                    flag_type = flag_payload.get("flag_type")
-                    description = flag_payload.get("description")
-                    target_type = flag_payload.get("target_type")
-                    target_id = flag_payload.get("target_id")
-                    suggested_change = flag_payload.get("suggested_change") or {}
+                pass_three_tables = (
+                    "threads",
+                    "loot",
+                    "decisions",
+                    "important_quotes",
+                    "combat_updates",
+                    "events",
+                )
+                for table_name in pass_three_tables:
+                    for create_op in table_changesets[table_name]["creates"]:
+                        confidence = _normalize_confidence(create_op, context=f"{table_name}.create")
+                        description = _normalize_description(
+                            create_op,
+                            fallback=f"Create {table_name} row from audit output",
+                        )
+                        data = _coerce_dict(
+                            create_op.get("data"),
+                            fallback_label=f"{table_name} create data",
+                        )
+                        status = "pending"
+                        after_snapshot = None
 
-                    if not isinstance(flag_type, str) or not isinstance(description, str):
-                        logger.warning("Skipping malformed audit_flag item: %s", flag_payload)
-                        continue
-                    session.add(
-                        AuditFlag(
-                            game_id=game_id,
-                            audit_run_id=audit_run_id,
-                            flag_type=flag_type,
-                            target_type=target_type if isinstance(target_type, str) else None,
-                            target_id=target_id if isinstance(target_id, int) else None,
+                        if confidence == "high":
+                            applied, _created_id, after_snapshot = await _apply_create(table_name, data)
+                            if applied:
+                                status = "applied"
+
+                        _append_flag(
+                            operation="create",
+                            table_name=table_name,
+                            confidence=confidence,
+                            target_id=None,
                             description=description,
-                            suggested_change=suggested_change if isinstance(suggested_change, dict) else {},
-                            status="pending",
+                            suggested_change={
+                                "data": data,
+                                "_before": None,
+                                "_after": after_snapshot if status == "applied" else None,
+                            },
+                            status=status,
                         )
-                    )
+
+                await session.flush()
+
+                # Phase B: updates / deletes / merges across all tables.
+                for table_name in table_order:
+                    for update_op in table_changesets[table_name]["updates"]:
+                        confidence = _normalize_confidence(update_op, context=f"{table_name}.update")
+                        description = _normalize_description(
+                            update_op,
+                            fallback=f"Update {table_name} row from audit output",
+                        )
+                        target_id = update_op.get("id") if isinstance(update_op.get("id"), int) else None
+                        changes = _coerce_dict(
+                            update_op.get("changes"),
+                            fallback_label=f"{table_name} update changes",
+                        )
+
+                        before_snapshot = None
+                        if target_id is not None:
+                            before_snapshot = await _load_snapshot(table_name, target_id)
+                        if before_snapshot is None:
+                            logger.warning(
+                                "Missing _before snapshot for %s update id=%s (game_id=%d)",
+                                table_name,
+                                target_id,
+                                game_id,
+                            )
+
+                        status = "pending"
+                        after_snapshot = None
+                        if confidence == "high" and target_id is not None and before_snapshot is not None:
+                            applied = await _apply_update(table_name, target_id, changes, before_snapshot)
+                            if applied:
+                                after_snapshot = await _load_snapshot(table_name, target_id)
+                                if after_snapshot is not None:
+                                    status = "applied"
+
+                        _append_flag(
+                            operation="update",
+                            table_name=table_name,
+                            confidence=confidence,
+                            target_id=target_id,
+                            description=description,
+                            suggested_change={
+                                "changes": changes,
+                                "_before": before_snapshot,
+                                "_after": after_snapshot if status == "applied" else None,
+                            },
+                            status=status,
+                        )
+
+                    for delete_op in table_changesets[table_name]["deletes"]:
+                        confidence = _normalize_confidence(delete_op, context=f"{table_name}.delete")
+                        description = _normalize_description(
+                            delete_op,
+                            fallback=f"Delete {table_name} row from audit output",
+                        )
+                        target_id = delete_op.get("id") if isinstance(delete_op.get("id"), int) else None
+
+                        before_snapshot = None
+                        if target_id is not None:
+                            before_snapshot = await _load_snapshot(table_name, target_id)
+                        if before_snapshot is None:
+                            logger.warning(
+                                "Missing _before snapshot for %s delete id=%s (game_id=%d)",
+                                table_name,
+                                target_id,
+                                game_id,
+                            )
+
+                        status = "pending"
+                        if confidence == "high" and target_id is not None and before_snapshot is not None:
+                            applied = await _apply_delete(table_name, target_id, description)
+                            if applied:
+                                status = "applied"
+
+                        _append_flag(
+                            operation="delete",
+                            table_name=table_name,
+                            confidence=confidence,
+                            target_id=target_id,
+                            description=description,
+                            suggested_change={
+                                "_before": before_snapshot,
+                                "_after": None,
+                            },
+                            status=status,
+                        )
+
+                    for merge_op in table_changesets[table_name]["merges"]:
+                        confidence = _normalize_confidence(merge_op, context=f"{table_name}.merge")
+                        description = _normalize_description(
+                            merge_op,
+                            fallback=f"Merge duplicate {table_name} rows from audit output",
+                        )
+                        canonical_id = (
+                            merge_op.get("canonical_id")
+                            if isinstance(merge_op.get("canonical_id"), int)
+                            else None
+                        )
+                        duplicate_id = (
+                            merge_op.get("duplicate_id")
+                            if isinstance(merge_op.get("duplicate_id"), int)
+                            else None
+                        )
+
+                        canonical_snapshot: Optional[dict[str, Any]] = None
+                        duplicate_snapshot: Optional[dict[str, Any]] = None
+                        if canonical_id is not None:
+                            canonical_snapshot = await _load_snapshot(table_name, canonical_id)
+                        if duplicate_id is not None:
+                            duplicate_snapshot = await _load_snapshot(table_name, duplicate_id)
+                        if canonical_snapshot is None or duplicate_snapshot is None:
+                            logger.warning(
+                                "Missing merge snapshot for %s canonical=%s duplicate=%s (game_id=%d)",
+                                table_name,
+                                canonical_id,
+                                duplicate_id,
+                                game_id,
+                            )
+
+                        status = "pending"
+                        if (
+                            confidence == "high"
+                            and canonical_id is not None
+                            and duplicate_id is not None
+                            and canonical_snapshot is not None
+                            and duplicate_snapshot is not None
+                        ):
+                            applied = await _apply_merge(table_name, canonical_id, duplicate_id)
+                            if applied:
+                                status = "applied"
+
+                        _append_flag(
+                            operation="merge",
+                            table_name=table_name,
+                            confidence=confidence,
+                            target_id=None,
+                            description=description,
+                            suggested_change={
+                                "canonical_id": canonical_id,
+                                "duplicate_id": duplicate_id,
+                                "_canonical": canonical_snapshot,
+                                "_duplicate": duplicate_snapshot,
+                            },
+                            status=status,
+                        )
 
                 await session.execute(
                     sa.update(AuditRun)
@@ -2599,6 +4893,69 @@ async def embed_unembedded_rows(game_id: int) -> None:
                         obj.embedding = vec  # type: ignore[attr-defined]
     except Exception:
         logger.exception("embed_unembedded_rows failed for game %d", game_id)
+
+
+async def _write_flag_embeddings(embed_ids: dict[str, list[int]]) -> None:
+    """Post-commit embedding write pass for rows touched by manual flag apply."""
+    delays = [5, 15, 45]
+    table_specs = [
+        ("entities", Entity, lambda e: f"[{e.entity_type}] {e.name}: {e.description}"),
+        (
+            "threads",
+            Thread,
+            lambda t: f"{t.text} — Resolution: {t.resolution or ''}" if t.is_resolved else t.text,
+        ),
+        ("events", Event, lambda e: e.text),
+        ("decisions", Decision, lambda d: f"Decision by {d.made_by}: {d.decision}"),
+        ("loot", Loot, lambda loot: f"Loot acquired by {loot.acquired_by}: {loot.item_name}"),
+        ("quests", Quest, lambda q: f"[Quest] {q.name}: {q.description}"),
+        (
+            "combat_updates",
+            CombatUpdate,
+            lambda c: f"Combat encounter: {c.encounter} — Outcome: {c.outcome}",
+        ),
+    ]
+
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            to_embed: list[tuple[type, int, str]] = []
+            async with AsyncSessionLocal() as session:
+                for table_name, model_cls, text_fn in table_specs:
+                    for row_id in sorted(set(embed_ids.get(table_name) or [])):
+                        row = await session.get(model_cls, row_id)
+                        if row is not None:
+                            to_embed.append((model_cls, row_id, text_fn(row)))
+
+            if not to_embed:
+                return
+
+            model_classes, pks, texts = zip(*to_embed)
+            vecs = await _embed_texts(list(texts))
+
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    for model_cls, pk, vec in zip(model_classes, pks, vecs):
+                        obj = await session.get(model_cls, pk)
+                        if obj is not None:
+                            obj.embedding = vec  # type: ignore[attr-defined]
+            return
+        except Exception:
+            if attempt == len(delays):
+                logger.exception(
+                    "Failed to write flag embeddings after %d attempts (embed_ids=%s)",
+                    attempt,
+                    embed_ids,
+                )
+                return
+            logger.warning(
+                "Flag embedding write attempt %d/%d failed; retrying in %ss (embed_ids=%s)",
+                attempt,
+                len(delays),
+                delay,
+                embed_ids,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
 
 
 async def _write_audit_embeddings(result: AuditPipelineResult) -> None:

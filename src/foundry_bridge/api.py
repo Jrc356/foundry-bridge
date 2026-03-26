@@ -132,8 +132,9 @@ class AuditFlagOut(BaseModel):
     id: int
     game_id: int
     audit_run_id: int
-    flag_type: str
-    target_type: Optional[str]
+    operation: str
+    table_name: str
+    confidence: str
     target_id: Optional[int]
     description: str
     suggested_change: dict[str, Any]

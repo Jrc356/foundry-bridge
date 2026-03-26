@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
-import { Check, Loader2, RotateCcw, X } from 'lucide-react'
+import { Check, Loader2, RotateCcw, X, Zap } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   applyAuditFlag,
@@ -10,6 +10,7 @@ import {
   reopenAuditFlag,
   triggerAudit,
 } from '../../api'
+import DiffView from '../../components/DiffView'
 import Toast from '../../components/Toast'
 import { TabHeader } from '../../components/TabHeader'
 import type { AuditFlag, AuditFlagMutation, AuditRun, FlagStatus } from '../../types'
@@ -29,6 +30,12 @@ const STATUS_BADGE: Record<FlagStatus, string> = {
   pending: 'bg-amber-900 text-amber-200 border border-amber-700',
   applied: 'bg-emerald-900 text-emerald-200 border border-emerald-700',
   dismissed: 'bg-gray-700 text-gray-300 border border-gray-600',
+}
+
+const CONFIDENCE_BADGE: Record<AuditFlag['confidence'], string> = {
+  high: 'bg-emerald-900 text-emerald-200',
+  medium: 'bg-yellow-900 text-yellow-200',
+  low: 'bg-red-900 text-red-200',
 }
 
 function toFilterStatus(filter: AuditFilter): FlagStatus | undefined {
@@ -318,10 +325,14 @@ export default function AuditTab({ gameId }: { gameId: number }) {
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_BADGE[displayStatus]}`}>
                         {displayStatus}
                       </span>
-                      <span className="text-xs text-gray-500 uppercase tracking-wider">{flag.flag_type.replaceAll('_', ' ')}</span>
-                      {flag.target_type && (
-                        <span className="text-xs text-gray-500">{flag.target_type}{flag.target_id != null ? ` #${flag.target_id}` : ''}</span>
-                      )}
+                      <span className="text-xs text-gray-500 uppercase tracking-wider">{`${flag.operation} ${flag.table_name}`.replaceAll('_', ' ')}</span>
+                      <span
+                        className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${CONFIDENCE_BADGE[flag.confidence]}`}
+                      >
+                        {flag.confidence === 'high' && <Zap size={11} className="shrink-0" />}
+                        {flag.confidence}
+                      </span>
+                      {flag.target_id != null && <span className="text-xs text-gray-500">#{flag.target_id}</span>}
                     </div>
                     <p className="text-sm text-gray-200 leading-relaxed">{flag.description}</p>
                     <p className="text-xs text-gray-500 mt-2">
@@ -376,14 +387,7 @@ export default function AuditTab({ gameId }: { gameId: number }) {
                   )}
                 </div>
 
-                {Object.keys(flag.suggested_change).length > 0 && (
-                  <details className="mt-3">
-                    <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-300">Suggested change payload</summary>
-                    <pre className="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 overflow-x-auto">
-                      {JSON.stringify(flag.suggested_change, null, 2)}
-                    </pre>
-                  </details>
-                )}
+                <DiffView flag={flag} />
               </article>
             )
           })}
