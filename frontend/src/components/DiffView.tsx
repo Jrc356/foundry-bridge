@@ -14,6 +14,23 @@ type DiffRow = {
   tone: RowTone
 }
 
+const META_FIELDS = new Set([
+  'operation',
+  'id',
+  'target_id',
+  'table_name',
+  'confidence',
+  'description',
+  'data',
+  'changes',
+  '_before',
+  '_after',
+  '_canonical',
+  '_duplicate',
+  'canonical_id',
+  'duplicate_id',
+])
+
 const MAX_VALUE_LENGTH = 60
 const INITIAL_UNCHANGED_ROWS = 3
 
@@ -34,6 +51,23 @@ function formatValue(value: unknown): string {
 function truncateValue(value: string): string {
   if (value.length <= MAX_VALUE_LENGTH) return value
   return `${value.slice(0, MAX_VALUE_LENGTH - 1)}…`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  return null
+}
+
+function nonMetaRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(record)) {
+    if (!META_FIELDS.has(key)) {
+      cleaned[key] = value
+    }
+  }
+  return cleaned
 }
 
 function buildRows(record: Record<string, unknown>, tone: RowTone, sigil: '+' | '-' | ' '): DiffRow[] {
@@ -82,11 +116,11 @@ function renderRecordSection(title: string, rows: DiffRow[], titleClassName: str
   )
 }
 
-function getCreatedId(flag: AuditFlag): number | string | null {
-  const payload = flag.suggested_change
-  if (payload.operation !== 'create') return null
+function getCreatedId(flag: AuditFlag, payload: Record<string, unknown>): number | string | null {
+  const data = asRecord(payload.data)
+  const after = asRecord(payload._after)
 
-  const payloadId = payload.data?.id
+  const payloadId = data?.id ?? after?.id
   if (typeof payloadId === 'number' || typeof payloadId === 'string') {
     return payloadId
   }
@@ -100,11 +134,13 @@ function getCreatedId(flag: AuditFlag): number | string | null {
 
 export default function DiffView({ flag }: DiffViewProps) {
   const [showAllUnchangedRows, setShowAllUnchangedRows] = useState(false)
-  const payload = flag.suggested_change
+  const payload = asRecord(flag.suggested_change) ?? {}
+  const operation = flag.operation
 
-  if (payload.operation === 'create') {
-    if (payload._after) {
-      const rows = buildRows(payload._after, 'added', '+')
+  if (operation === 'create') {
+    const afterSnapshot = asRecord(payload._after)
+    if (afterSnapshot) {
+      const rows = buildRows(afterSnapshot, 'added', '+')
 
       return (
         <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 space-y-1">
@@ -117,7 +153,19 @@ export default function DiffView({ flag }: DiffViewProps) {
       )
     }
 
-    const createdId = getCreatedId(flag)
+    const proposedData = asRecord(payload.data)
+    if (proposedData && Object.keys(proposedData).length > 0) {
+      const rows = buildRows(proposedData, 'added', '+')
+      return (
+        <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 space-y-1">
+          {rows.map(row => (
+            <DiffRowLine key={`create:data:${row.keyName}:${row.value}`} row={row} />
+          ))}
+        </div>
+      )
+    }
+
+    const createdId = getCreatedId(flag, payload)
 
     return (
       <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3">
@@ -128,20 +176,47 @@ export default function DiffView({ flag }: DiffViewProps) {
     )
   }
 
-  if (payload.operation === 'delete') {
-    const rows = buildRows(payload._before, 'removed', '-')
+  if (operation === 'delete') {
+    const beforeSnapshot = asRecord(payload._before)
+    const candidate = beforeSnapshot ?? nonMetaRecord(payload)
+    const rows = Object.keys(candidate).length > 0 ? buildRows(candidate, 'removed', '-') : []
 
     return (
       <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 space-y-1">
-        {rows.map(row => (
-          <DiffRowLine key={`delete:${row.keyName}:${row.value}`} row={row} />
-        ))}
+        {rows.length > 0 ? (
+          rows.map(row => <DiffRowLine key={`delete:${row.keyName}:${row.value}`} row={row} />)
+        ) : (
+          <p className="font-mono text-xs text-gray-400">Record will be deleted.</p>
+        )}
       </div>
     )
   }
 
-  if (payload.operation === 'update') {
-    const allKeys = Array.from(new Set([...Object.keys(payload._before), ...Object.keys(payload._after)])).sort((a, b) =>
+  if (operation === 'update') {
+    const beforeSnapshot = asRecord(payload._before)
+    const afterSnapshot = asRecord(payload._after)
+
+    if (!beforeSnapshot || !afterSnapshot) {
+      const proposedChanges = asRecord(payload.changes)
+      if (proposedChanges && Object.keys(proposedChanges).length > 0) {
+        const rows = buildRows(proposedChanges, 'added', '+')
+        return (
+          <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 space-y-1">
+            {rows.map(row => (
+              <DiffRowLine key={`update:fallback:${row.keyName}:${row.value}`} row={row} />
+            ))}
+          </div>
+        )
+      }
+
+      return (
+        <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3">
+          <p className="font-mono text-xs text-gray-400">No field-level diff available for this update.</p>
+        </div>
+      )
+    }
+
+    const allKeys = Array.from(new Set([...Object.keys(beforeSnapshot), ...Object.keys(afterSnapshot)])).sort((a, b) =>
       a.localeCompare(b),
     )
 
@@ -149,8 +224,8 @@ export default function DiffView({ flag }: DiffViewProps) {
     const unchangedRows: DiffRow[] = []
 
     for (const keyName of allKeys) {
-      const beforeValue = formatValue(payload._before[keyName])
-      const afterValue = formatValue(payload._after[keyName])
+      const beforeValue = formatValue(beforeSnapshot[keyName])
+      const afterValue = formatValue(afterSnapshot[keyName])
 
       if (beforeValue !== afterValue) {
         changedRows.push({ keyName, value: beforeValue, sigil: '-', tone: 'removed' })
@@ -192,9 +267,36 @@ export default function DiffView({ flag }: DiffViewProps) {
     )
   }
 
-  if (payload.operation === 'merge') {
-    const duplicateRows = buildRows(payload._duplicate, 'removed', '-')
-    const canonicalRows = buildRows(payload._canonical, 'neutral', ' ')
+  if (operation === 'merge') {
+    const duplicateSnapshot = asRecord(payload._duplicate)
+    const canonicalSnapshot = asRecord(payload._canonical)
+
+    if (!duplicateSnapshot || !canonicalSnapshot) {
+      const fallbackRowsPayload: Record<string, unknown> = {}
+      const canonicalId = payload.canonical_id
+      const duplicateId = payload.duplicate_id
+
+      if (typeof canonicalId === 'number' || typeof canonicalId === 'string') {
+        fallbackRowsPayload.canonical_id = canonicalId
+      }
+      if (typeof duplicateId === 'number' || typeof duplicateId === 'string') {
+        fallbackRowsPayload.duplicate_id = duplicateId
+      }
+
+      const fallbackRows = buildRows(fallbackRowsPayload, 'neutral', ' ')
+      return (
+        <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 space-y-1">
+          {fallbackRows.length > 0 ? (
+            fallbackRows.map(row => <DiffRowLine key={`merge:fallback:${row.keyName}:${row.value}`} row={row} />)
+          ) : (
+            <p className="font-mono text-xs text-gray-400">Merge details unavailable for this flag.</p>
+          )}
+        </div>
+      )
+    }
+
+    const duplicateRows = buildRows(duplicateSnapshot, 'removed', '-')
+    const canonicalRows = buildRows(canonicalSnapshot, 'neutral', ' ')
 
     return (
       <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/70 p-3 space-y-3">

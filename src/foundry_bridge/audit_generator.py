@@ -447,7 +447,7 @@ def _apply_legacy_compat_bridge(output: AuditOutput) -> None:
                 confidence=op.confidence,
                 description=op.description,
                 target_id=op.id,
-                suggested_change=op.changes,
+                suggested_change={"changes": op.changes},
             )
 
         for op in changeset.deletes:

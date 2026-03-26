@@ -1299,13 +1299,48 @@ async def _apply_flag_change(
                 message="Update operation requires target_id or suggested_change.id",
             )
 
-        changes = change.get("changes")
-        if not isinstance(changes, dict):
+        raw_changes = change.get("changes")
+        if isinstance(raw_changes, dict):
+            changes = dict(raw_changes)
+        else:
+            legacy_meta_keys = {
+                "operation",
+                "id",
+                "target_id",
+                "table_name",
+                "confidence",
+                "description",
+                "data",
+                "changes",
+                "_before",
+                "_after",
+                "_canonical",
+                "_duplicate",
+                "canonical_id",
+                "duplicate_id",
+            }
+            changes = {
+                key: value
+                for key, value in change.items()
+                if key not in legacy_meta_keys
+            }
+
+        legacy_key_map = {
+            "new_item_name": "item_name",
+            "new_acquired_by": "acquired_by",
+            "new_decision": "decision",
+            "new_made_by": "made_by",
+        }
+        for legacy_key, canonical_key in legacy_key_map.items():
+            if canonical_key not in changes and legacy_key in changes:
+                changes[canonical_key] = changes[legacy_key]
+
+        if not isinstance(changes, dict) or not changes:
             return _result(
                 ok=False,
                 noop=False,
                 reason_code="invalid_shape",
-                message="Update operation requires suggested_change.changes dict",
+                message="Update operation requires either suggested_change.changes dict or flat field payload",
             )
 
         if table_name == "entities":
