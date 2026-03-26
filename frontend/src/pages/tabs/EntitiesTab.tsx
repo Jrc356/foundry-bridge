@@ -5,6 +5,7 @@ import { createEntity, deleteEntity, getEntities, getNotes, updateEntity } from 
 import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
 import type { Entity, Note } from '../../types'
+import { sortByCreatedAtDesc } from '../../utils/datetime'
 
 const ENTITY_TYPES = ['npc', 'location', 'item', 'faction', 'other'] as const
 
@@ -28,6 +29,7 @@ export default function EntitiesTab({ gameId }: { gameId: number }) {
     queryKey: ['entities', gameId, filter === 'all' ? undefined : filter],
     queryFn: () => getEntities(gameId, filter === 'all' ? undefined : filter),
   })
+  const sortedEntities = sortByCreatedAtDesc(entities)
   const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const createMut = useMutation({
@@ -101,7 +103,7 @@ export default function EntitiesTab({ gameId }: { gameId: number }) {
         <p className="text-gray-500 text-sm">No entities found.</p>
       ) : (
         <div className="grid gap-3">
-          {entities.map((entity: Entity) => (
+          {sortedEntities.map((entity: Entity) => (
             <div key={entity.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
               {editing === entity.id ? (
                 <div className="grid gap-3">

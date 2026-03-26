@@ -15,6 +15,7 @@ import {
 } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
 import type { Entity, Loot, Note, Quest, QuestDescriptionHistory, Thread } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 const STATUS_BADGE: Record<Quest['status'], string> = {
   active: 'bg-amber-900 text-amber-200 border border-amber-700',
@@ -26,15 +27,16 @@ function QuestHistorySection({ questId }: { questId: number }) {
     queryKey: ['quest-history', questId],
     queryFn: () => getQuestHistory(questId),
   })
+  const sortedHistory = sortByCreatedAtDesc(history)
   if (isLoading) return <p className="text-xs text-gray-500">Loading history…</p>
   if (history.length === 0)
     return <p className="text-xs text-gray-600">No previous descriptions recorded.</p>
   return (
     <ol className="grid gap-2">
-      {history.map(h => (
+      {sortedHistory.map(h => (
         <li key={h.id} className="grid gap-1 bg-gray-900 rounded-lg px-3 py-2">
           <time className="text-xs text-gray-500">
-            {new Date(h.created_at).toLocaleString()}
+            {formatTimestamp(h.created_at)}
           </time>
           <p className="text-xs text-gray-400">{h.description}</p>
         </li>
@@ -163,25 +165,25 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
   }
 
   const questThreads = (questId: number): Thread[] =>
-    (threads as Thread[]).filter(t => t.quest_id === questId)
+    sortByCreatedAtDesc((threads as Thread[]).filter(t => t.quest_id === questId))
 
   const questNotesFor = (noteIds: number[]): Note[] =>
-    (notes as Note[]).filter(n => noteIds.includes(n.id))
+    sortByCreatedAtDesc((notes as Note[]).filter(n => noteIds.includes(n.id)))
 
   const questLoot = (questId: number): Loot[] =>
-    (loot as Loot[]).filter(l => l.quest_id === questId)
+    sortByCreatedAtDesc((loot as Loot[]).filter(l => l.quest_id === questId))
 
   if (isLoading) return <div className="p-6 text-gray-400">Loading…</div>
 
-  const activeQuests = quests.filter(q => q.status === 'active')
-  const completedQuests = quests.filter(q => q.status === 'completed')
+  const activeQuests = sortByCreatedAtDesc(quests.filter(q => q.status === 'active'))
+  const completedQuests = sortByCreatedAtDesc(quests.filter(q => q.status === 'completed'))
   const displayGroups: Array<{ label: string; items: Quest[] }> =
     filter === 'all'
       ? [
           { label: 'Active', items: activeQuests },
           { label: 'Completed', items: completedQuests },
         ]
-      : [{ label: filter === 'active' ? 'Active' : 'Completed', items: quests }]
+      : [{ label: filter === 'active' ? 'Active' : 'Completed', items: sortByCreatedAtDesc(quests) }]
 
   return (
     <div className="p-6 max-w-4xl">
@@ -447,7 +449,7 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                               <ul className="grid gap-2">
                                 {questNotesFor(quest.note_ids).map(n => (
                                   <li key={n.id} className="text-xs bg-gray-900 rounded-lg px-3 py-2">
-                                    <time className="text-gray-500 block mb-0.5">{new Date(n.created_at).toLocaleDateString()}</time>
+                                    <time className="text-gray-500 block mb-0.5">{formatTimestamp(n.created_at)}</time>
                                     <p className="text-gray-300 mb-1">
                                       {expandedNotes.has(n.id) ? n.summary : n.summary.length > 120 ? n.summary.slice(0, 120) + '…' : n.summary}
                                     </p>
@@ -487,7 +489,7 @@ export default function QuestLogTab({ gameId }: { gameId: number }) {
                           </div>
                         )}
                         <p className="text-xs text-gray-600">
-                          Created {new Date(quest.created_at).toLocaleDateString()} ·{' '}
+                          Created {formatTimestamp(quest.created_at)} ·{' '}
                           {quest.note_ids.length} note{quest.note_ids.length !== 1 ? 's' : ''}
                         </p>
                       </div>

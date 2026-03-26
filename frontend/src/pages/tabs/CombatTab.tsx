@@ -4,10 +4,12 @@ import { deleteCombat, getCombat, getNotes } from '../../api'
 import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
 import type { CombatUpdate, Note } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 export default function CombatTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: combat = [], isLoading } = useQuery({ queryKey: ['combat', gameId], queryFn: () => getCombat(gameId) })
+  const sortedCombat = sortByCreatedAtDesc(combat)
   const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const deleteMut = useMutation({
@@ -25,12 +27,12 @@ export default function CombatTab({ gameId }: { gameId: number }) {
         <p className="text-gray-500 text-sm">No combat encounters recorded.</p>
       ) : (
         <div className="grid gap-3">
-          {combat.map((c: CombatUpdate) => (
+          {sortedCombat.map((c: CombatUpdate) => (
             <div key={c.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 flex items-start justify-between gap-4">
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-red-300">{c.encounter}</p>
                 <p className="text-sm text-gray-400 mt-1">{c.outcome}</p>
-                <p className="text-xs text-gray-600 mt-2">{new Date(c.created_at).toLocaleDateString()}</p>
+                <p className="text-xs text-gray-600 mt-2">{formatTimestamp(c.created_at)}</p>
                 <NotesBadge notes={(notes as Note[]).filter(n => n.id === c.note_id)} />
               </div>
               <button onClick={() => confirm('Delete combat record?') && deleteMut.mutate(c.id)}

@@ -3,6 +3,7 @@ import { BookOpen, Dices, MapPin, Search, Shield, Sparkles, Swords, Trophy, Zap 
 import { useState } from 'react'
 import { searchGame } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 import type {
   CombatUpdate,
   Decision,
@@ -56,6 +57,15 @@ export default function SearchTab({ gameId }: { gameId: number }) {
       data.combat.length +
       (data.quests?.length ?? 0)
     : 0
+
+  const sortedEntities = data ? sortByCreatedAtDesc(data.entities) : []
+  const sortedNotes = data ? sortByCreatedAtDesc(data.notes) : []
+  const sortedThreads = data ? sortByCreatedAtDesc(data.threads) : []
+  const sortedEvents = data ? sortByCreatedAtDesc(data.events) : []
+  const sortedDecisions = data ? sortByCreatedAtDesc(data.decisions) : []
+  const sortedLoot = data ? sortByCreatedAtDesc(data.loot) : []
+  const sortedCombat = data ? sortByCreatedAtDesc(data.combat) : []
+  const sortedQuests = data ? sortByCreatedAtDesc(data.quests) : []
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -126,7 +136,7 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Entities */}
           {data.entities.length > 0 && (
             <Section title="Entities" icon={<Shield size={14} />} count={data.entities.length}>
-              {data.entities.map((e: Entity) => (
+              {sortedEntities.map((e: Entity) => (
                 <div key={e.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <div className="flex items-center gap-2 mb-1">
                     <span className={`text-xs font-medium px-2 py-0.5 rounded-full capitalize ${ENTITY_TYPE_COLORS[e.entity_type] ?? 'bg-gray-700 text-gray-300'}`}>
@@ -143,10 +153,10 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Notes */}
           {data.notes.length > 0 && (
             <Section title="Notes" icon={<BookOpen size={14} />} count={data.notes.length}>
-              {data.notes.map((n: Note) => (
+              {sortedNotes.map((n: Note) => (
                 <div key={n.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <p className="text-sm text-gray-200 leading-relaxed">{n.summary}</p>
-                  <p className="text-xs text-gray-500 mt-2">{new Date(n.created_at).toLocaleString()}</p>
+                  <p className="text-xs text-gray-500 mt-2">{formatTimestamp(n.created_at)}</p>
                 </div>
               ))}
             </Section>
@@ -155,7 +165,7 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Threads */}
           {data.threads.length > 0 && (
             <Section title="Threads" icon={<Sparkles size={14} />} count={data.threads.length}>
-              {data.threads.map((t: Thread) => (
+              {sortedThreads.map((t: Thread) => (
                 <div key={t.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <div className="flex items-center gap-2 mb-1">
                     <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${t.is_resolved ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
@@ -174,10 +184,10 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Events */}
           {data.events.length > 0 && (
             <Section title="Events" icon={<Zap size={14} />} count={data.events.length}>
-              {data.events.map((e: Event) => (
+              {sortedEvents.map((e: Event) => (
                 <div key={e.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <p className="text-sm text-gray-200">{e.text}</p>
-                  <p className="text-xs text-gray-500 mt-1">{new Date(e.created_at).toLocaleDateString()}</p>
+                  <p className="text-xs text-gray-500 mt-1">{formatTimestamp(e.created_at)}</p>
                 </div>
               ))}
             </Section>
@@ -186,10 +196,10 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Decisions */}
           {data.decisions.length > 0 && (
             <Section title="Decisions" icon={<Dices size={14} />} count={data.decisions.length}>
-              {data.decisions.map((d: Decision) => (
+              {sortedDecisions.map((d: Decision) => (
                 <div key={d.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <p className="text-sm text-gray-200">{d.decision}</p>
-                  <p className="text-xs text-gray-500 mt-1">by {d.made_by} · {new Date(d.created_at).toLocaleDateString()}</p>
+                  <p className="text-xs text-gray-500 mt-1">by {d.made_by} · {formatTimestamp(d.created_at)}</p>
                 </div>
               ))}
             </Section>
@@ -198,7 +208,7 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Loot */}
           {data.loot.length > 0 && (
             <Section title="Loot" icon={<Trophy size={14} />} count={data.loot.length}>
-              {data.loot.map((l: Loot) => (
+              {sortedLoot.map((l: Loot) => (
                 <div key={l.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <p className="text-sm font-medium text-gray-100">{l.item_name}</p>
                   <p className="text-xs text-gray-500 mt-0.5">acquired by {l.acquired_by}</p>
@@ -210,11 +220,11 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Combat */}
           {data.combat.length > 0 && (
             <Section title="Combat" icon={<Swords size={14} />} count={data.combat.length}>
-              {data.combat.map((c: CombatUpdate) => (
+              {sortedCombat.map((c: CombatUpdate) => (
                 <div key={c.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <p className="text-sm font-medium text-gray-100">{c.encounter}</p>
                   <p className="text-sm text-gray-400 mt-1">{c.outcome}</p>
-                  <p className="text-xs text-gray-500 mt-1">{new Date(c.created_at).toLocaleDateString()}</p>
+                  <p className="text-xs text-gray-500 mt-1">{formatTimestamp(c.created_at)}</p>
                 </div>
               ))}
             </Section>
@@ -223,7 +233,7 @@ export default function SearchTab({ gameId }: { gameId: number }) {
           {/* Quests */}
           {(data.quests?.length ?? 0) > 0 && (
             <Section title="Quests" icon={<MapPin size={14} />} count={data.quests.length}>
-              {data.quests.map((q: Quest) => (
+              {sortedQuests.map((q: Quest) => (
                 <div key={q.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
                   <div className="flex items-center gap-2 mb-1">
                     <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${

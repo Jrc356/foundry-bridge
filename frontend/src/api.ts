@@ -1,9 +1,14 @@
 import axios from 'axios';
 import type {
+  AuditFlag,
+  AuditFlagMutation,
+  AuditRun,
+  AuditRunTrigger,
   CombatUpdate,
   Decision,
   Entity,
   Event,
+  FlagStatus,
   Game,
   ImportantQuote,
   Loot,
@@ -11,6 +16,7 @@ import type {
   PlayerCharacter,
   Quest,
   QuestDescriptionHistory,
+  RestoreMutation,
   SearchResults,
   Thread,
   Transcript,
@@ -32,10 +38,34 @@ export const getNotes = (gameId: number) =>
   api.get<Note[]>(`/games/${gameId}/notes`).then(r => r.data);
 export const deleteNote = (id: number) => api.delete(`/notes/${id}`);
 
+// ── Audit ──────────────────────────────────────────────────────────────────
+export const getAuditRuns = (gameId: number) =>
+  api.get<AuditRun[]>(`/games/${gameId}/audit-runs`).then(r => r.data);
+export const triggerAudit = (gameId: number, force = false) =>
+  api.post<AuditRunTrigger>(`/games/${gameId}/audit-runs/trigger`, undefined, {
+    params: { force },
+  }).then(r => r.data);
+export const getAuditFlags = (gameId: number, status?: FlagStatus, offset?: number, limit?: number) =>
+  api.get<AuditFlag[]>(`/games/${gameId}/audit-flags`, {
+    params: {
+      ...(status ? { status } : {}),
+      ...(offset !== undefined ? { offset } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    },
+  }).then(r => r.data);
+export const applyAuditFlag = (gameId: number, flagId: number) =>
+  api.post<AuditFlagMutation>(`/games/${gameId}/audit-flags/${flagId}/apply`).then(r => r.data);
+export const dismissAuditFlag = (gameId: number, flagId: number) =>
+  api.post<AuditFlagMutation>(`/games/${gameId}/audit-flags/${flagId}/dismiss`).then(r => r.data);
+export const reopenAuditFlag = (gameId: number, flagId: number) =>
+  api.post<AuditFlagMutation>(`/games/${gameId}/audit-flags/${flagId}/reopen`).then(r => r.data);
+
 // ── Entities ───────────────────────────────────────────────────────────────
 export const getEntities = (gameId: number, entityType?: string) =>
   api.get<Entity[]>(`/games/${gameId}/entities`, { params: entityType ? { entity_type: entityType } : undefined })
     .then(r => r.data);
+export const getEntity = (entityId: number) =>
+  api.get<Entity>(`/entities/${entityId}`).then(r => r.data);
 export const createEntity = (gameId: number, data: Pick<Entity, 'name' | 'description' | 'entity_type'>) =>
   api.post<Entity>(`/games/${gameId}/entities`, data).then(r => r.data);
 export const updateEntity = (id: number, data: Partial<Pick<Entity, 'name' | 'description' | 'entity_type'>>) =>
@@ -51,6 +81,8 @@ export const createThread = (gameId: number, text: string) =>
 export const updateThread = (id: number, data: Partial<Pick<Thread, 'text' | 'is_resolved' | 'resolution' | 'resolved_by_note_id' | 'quest_id'>>) =>
   api.put<Thread>(`/threads/${id}`, data).then(r => r.data);
 export const deleteThread = (id: number) => api.delete(`/threads/${id}`);
+export const restoreThread = (gameId: number, threadId: number) =>
+  api.post<RestoreMutation>(`/games/${gameId}/threads/${threadId}/restore`).then(r => r.data);
 
 // ── Transcripts ────────────────────────────────────────────────────────────
 export const getTranscripts = (gameId: number, params?: { character_name?: string; limit?: number; offset?: number }) =>
@@ -74,6 +106,8 @@ export const createQuest = (gameId: number, data: Pick<Quest, 'name' | 'descript
 export const updateQuest = (id: number, data: Partial<Pick<Quest, 'name' | 'description' | 'status' | 'quest_giver_entity_id'>>) =>
   api.patch<Quest>(`/quests/${id}`, data).then(r => r.data);
 export const deleteQuest = (id: number) => api.delete(`/quests/${id}`);
+export const restoreQuest = (gameId: number, questId: number) =>
+  api.post<RestoreMutation>(`/games/${gameId}/quests/${questId}/restore`).then(r => r.data);
 export const getQuestHistory = (questId: number) =>
   api.get<QuestDescriptionHistory[]>(`/quests/${questId}/history`).then(r => r.data);
 

@@ -15,12 +15,13 @@ import {
   Zap,
 } from 'lucide-react'
 import { Link, Navigate, Route, Routes, useParams } from 'react-router-dom'
-import { getGame } from '../api'
+import { getAuditFlags, getGame } from '../api'
 import CombatTab from './tabs/CombatTab'
 import DecisionsTab from './tabs/DecisionsTab'
 import EntitiesTab from './tabs/EntitiesTab'
 import EventsTab from './tabs/EventsTab'
 import LootTab from './tabs/LootTab'
+import AuditTab from './tabs/AuditTab'
 import NotesTab from './tabs/NotesTab'
 import PlayerCharactersTab from './tabs/PlayerCharactersTab'
 import QuestLogTab from './tabs/QuestLogTab'
@@ -33,6 +34,7 @@ const TABS = [
   { id: 'search', label: 'Search', icon: Search },
   { id: 'quests', label: 'Quest Log', icon: MapPin },
   { id: 'notes', label: 'Notes', icon: BookOpen },
+  { id: 'audit', label: 'Audit', icon: Shield },
   { id: 'entities', label: 'Entities', icon: Shield },
   { id: 'threads', label: 'Threads', icon: Sparkles },
   { id: 'transcripts', label: 'Transcripts', icon: ScrollText },
@@ -48,6 +50,13 @@ export default function GameDetail() {
   const { id } = useParams<{ id: string }>()
   const gameId = Number(id)
   const { data: game, isLoading } = useQuery({ queryKey: ['game', gameId], queryFn: () => getGame(gameId) })
+  const { data: pendingFlags = [] } = useQuery({
+    queryKey: ['audit-flags-pending-count', gameId],
+    queryFn: () => getAuditFlags(gameId, 'pending', 0, 51),
+  })
+
+  const pendingAuditBadge =
+    pendingFlags.length === 0 ? undefined : pendingFlags.length > 50 ? '50+' : String(pendingFlags.length)
 
   if (isLoading) return <div className="min-h-screen bg-gray-950 text-gray-400 p-8 flex items-center justify-center">Loading…</div>
   if (!game) return <div className="min-h-screen bg-gray-950 text-red-400 p-8">Campaign not found</div>
@@ -65,7 +74,7 @@ export default function GameDetail() {
         </div>
         <nav className="flex-1 p-2 overflow-y-auto">
           {TABS.map(tab => (
-            <NavLink key={tab.id} gameId={gameId} {...tab} />
+            <NavLink key={tab.id} gameId={gameId} badge={tab.id === 'audit' ? pendingAuditBadge : undefined} {...tab} />
           ))}
         </nav>
       </aside>
@@ -77,6 +86,7 @@ export default function GameDetail() {
           <Route path="quests" element={<QuestLogTab gameId={gameId} />} />
           <Route path="search" element={<SearchTab gameId={gameId} />} />
           <Route path="notes" element={<NotesTab gameId={gameId} />} />
+          <Route path="audit" element={<AuditTab gameId={gameId} />} />
           <Route path="entities" element={<EntitiesTab gameId={gameId} />} />
           <Route path="threads" element={<ThreadsTab gameId={gameId} />} />
           <Route path="transcripts" element={<TranscriptsTab gameId={gameId} />} />
@@ -92,7 +102,7 @@ export default function GameDetail() {
   )
 }
 
-function NavLink({ gameId, id, label, icon: Icon }: { gameId: number; id: string; label: string; icon: React.ElementType }) {
+function NavLink({ gameId, id, label, icon: Icon, badge }: { gameId: number; id: string; label: string; icon: React.ElementType; badge?: string }) {
   const isActive = location.pathname.endsWith(`/games/${gameId}/${id}`) || location.pathname.includes(`/games/${gameId}/${id}`)
   return (
     <Link
@@ -102,7 +112,12 @@ function NavLink({ gameId, id, label, icon: Icon }: { gameId: number; id: string
       }`}
     >
       <Icon size={15} />
-      {label}
+      <span className="flex-1 min-w-0 truncate">{label}</span>
+      {badge && (
+        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/20 text-white' : 'bg-amber-900 text-amber-200'}`}>
+          {badge}
+        </span>
+      )}
     </Link>
   )
 }

@@ -5,18 +5,24 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import sqlalchemy as sa
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from foundry_bridge.auditor import trigger_manual_audit
 from foundry_bridge.db import (
     AsyncSessionLocal,
+    apply_audit_flag,
+    dismiss_audit_flag,
+    reopen_audit_flag,
+    restore_deleted_quest,
+    restore_deleted_thread,
     search_combat,
     search_decisions,
     search_entities,
@@ -28,6 +34,8 @@ from foundry_bridge.db import (
     search_resolved_threads,
 )
 from foundry_bridge.models import (
+    AuditFlag,
+    AuditRun,
     CombatUpdate,
     Decision,
     Entity,
@@ -62,6 +70,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+def _reason_json(status_code: int, payload: dict[str, Any], reason_code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers={"X-Reason-Code": reason_code},
+    )
+
+
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 
@@ -88,6 +104,72 @@ class NoteOut(BaseModel):
     summary: str
     source_transcript_ids: list[int]
     created_at: datetime
+    is_audit: bool
+
+    class Config:
+        from_attributes = True
+
+
+class AuditRunOut(BaseModel):
+    id: int
+    game_id: int
+    triggered_at: datetime
+    heartbeat_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    status: str
+    trigger_source: str
+    notes_audited: list[int]
+    notes_audited_count: int
+    min_note_id: Optional[int]
+    max_note_id: Optional[int]
+    audit_note_id: Optional[int]
+
+    class Config:
+        from_attributes = True
+
+
+class AuditFlagOut(BaseModel):
+    id: int
+    game_id: int
+    audit_run_id: int
+    flag_type: str
+    target_type: Optional[str]
+    target_id: Optional[int]
+    description: str
+    suggested_change: dict[str, Any]
+    status: str
+    created_at: datetime
+    resolved_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class AuditFlagMutationOut(BaseModel):
+    flag_id: int
+    ok: bool
+    noop: bool
+    status: Optional[str]
+    reason_code: str
+    message: str
+    details: dict[str, Any] = {}
+
+
+class AuditRunTriggerOut(BaseModel):
+    ok: bool
+    noop: bool
+    reason_code: str
+    message: str
+    run: Optional[AuditRunOut] = None
+
+
+class RestoreMutationOut(BaseModel):
+    ok: bool
+    noop: bool
+    reason_code: str
+    message: str
+    quest_id: Optional[int] = None
+    thread_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -361,6 +443,12 @@ async def delete_note(note_id: int, db: AsyncSession = Depends(get_db)):
     note = await db.get(Note, note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
+    if note.is_audit:
+        raise HTTPException(
+            status_code=409,
+            detail="Audit-generated notes cannot be deleted",
+            headers={"X-Reason-Code": "conflict_audit_note"},
+        )
     await db.delete(note)
     await db.commit()
 
@@ -369,7 +457,7 @@ async def delete_note(note_id: int, db: AsyncSession = Depends(get_db)):
 async def list_note_events(game_id: int, note_id: int, db: AsyncSession = Depends(get_db)):
     """Get all events linked to a specific note (many-to-many via notes_events table)."""
     from foundry_bridge.models import notes_events_table
-    
+
     result = await db.execute(
         sa.select(Event)
         .join(notes_events_table, Event.id == notes_events_table.c.event_id)
@@ -386,7 +474,7 @@ async def list_note_events(game_id: int, note_id: int, db: AsyncSession = Depend
 async def list_note_loot(game_id: int, note_id: int, db: AsyncSession = Depends(get_db)):
     """Get all loot linked to a specific note (many-to-many via notes_loot table)."""
     from foundry_bridge.models import notes_loot_table
-    
+
     result = await db.execute(
         sa.select(Loot)
         .join(notes_loot_table, Loot.id == notes_loot_table.c.loot_id)
@@ -397,6 +485,145 @@ async def list_note_loot(game_id: int, note_id: int, db: AsyncSession = Depends(
         .order_by(Loot.created_at.asc())
     )
     return result.scalars().all()
+
+
+# ── Audits ────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/games/{game_id}/audit-runs", response_model=list[AuditRunOut])
+async def list_audit_runs(game_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        sa.select(AuditRun)
+        .where(AuditRun.game_id == game_id)
+        .order_by(AuditRun.triggered_at.desc(), AuditRun.id.desc())
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/games/{game_id}/audit-runs/trigger", response_model=AuditRunTriggerOut)
+async def trigger_audit(game_id: int, force: bool = Query(default=False), db: AsyncSession = Depends(get_db)):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    trigger_result = await trigger_manual_audit(game_id=game_id, force=force)
+
+    run_out: Optional[AuditRunOut] = None
+    if trigger_result.audit_run_id is not None:
+        run = await db.get(AuditRun, trigger_result.audit_run_id)
+        if run is not None:
+            run_out = AuditRunOut.model_validate(run)
+
+    payload = AuditRunTriggerOut(
+        ok=trigger_result.ok,
+        noop=trigger_result.noop,
+        reason_code=trigger_result.reason_code,
+        message=trigger_result.message,
+        run=run_out,
+    )
+
+    if not trigger_result.ok:
+        if trigger_result.reason_code == "conflict_running":
+            return _reason_json(409, payload.model_dump(mode="json"), trigger_result.reason_code)
+        return _reason_json(500, payload.model_dump(mode="json"), trigger_result.reason_code)
+
+    return payload
+
+
+@app.get("/api/games/{game_id}/audit-flags", response_model=list[AuditFlagOut])
+async def list_audit_flags(
+    game_id: int,
+    status: Optional[str] = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    if status is not None and status not in {"pending", "applied", "dismissed"}:
+        raise HTTPException(status_code=400, detail="status must be one of pending|applied|dismissed")
+
+    q = sa.select(AuditFlag).where(AuditFlag.game_id == game_id)
+    if status is not None:
+        q = q.where(AuditFlag.status == status)
+    q = q.order_by(AuditFlag.created_at.desc(), AuditFlag.id.desc()).offset(offset).limit(limit)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+async def _flag_not_found_response(flag_id: int) -> JSONResponse:
+    payload = AuditFlagMutationOut(
+        flag_id=flag_id,
+        ok=False,
+        noop=False,
+        status=None,
+        reason_code="not_found",
+        message="Audit flag not found for game",
+        details={},
+    )
+    return _reason_json(404, payload.model_dump(mode="json"), payload.reason_code)
+
+
+async def _flag_mutation_response(flag_id: int, mutation: str, game_id: int, db: AsyncSession):
+    flag = await db.get(AuditFlag, flag_id)
+    if flag is None or flag.game_id != game_id:
+        return await _flag_not_found_response(flag_id)
+
+    if mutation == "apply":
+        result = await apply_audit_flag(flag_id)
+    elif mutation == "dismiss":
+        result = await dismiss_audit_flag(flag_id)
+    else:
+        result = await reopen_audit_flag(flag_id)
+
+    payload = AuditFlagMutationOut(
+        flag_id=result.flag_id,
+        ok=result.ok,
+        noop=result.noop,
+        status=result.status,
+        reason_code=result.reason_code,
+        message=result.message,
+        details=result.details,
+    )
+
+    if not result.ok:
+        status_code = 409 if result.reason_code == "invalid_transition" else 400
+        if result.reason_code == "not_found":
+            status_code = 404
+        return _reason_json(status_code, payload.model_dump(mode="json"), result.reason_code)
+
+    return payload
+
+
+@app.post("/api/games/{game_id}/audit-flags/{flag_id}/apply", response_model=AuditFlagMutationOut)
+async def apply_audit_flag_endpoint(game_id: int, flag_id: int, db: AsyncSession = Depends(get_db)):
+    return await _flag_mutation_response(flag_id=flag_id, mutation="apply", game_id=game_id, db=db)
+
+
+@app.post("/api/games/{game_id}/audit-flags/{flag_id}/dismiss", response_model=AuditFlagMutationOut)
+async def dismiss_audit_flag_endpoint(game_id: int, flag_id: int, db: AsyncSession = Depends(get_db)):
+    return await _flag_mutation_response(flag_id=flag_id, mutation="dismiss", game_id=game_id, db=db)
+
+
+@app.post("/api/games/{game_id}/audit-flags/{flag_id}/reopen", response_model=AuditFlagMutationOut)
+async def reopen_audit_flag_endpoint(game_id: int, flag_id: int, db: AsyncSession = Depends(get_db)):
+    return await _flag_mutation_response(flag_id=flag_id, mutation="reopen", game_id=game_id, db=db)
+
+
+@app.post("/api/games/{game_id}/quests/{quest_id}/restore", response_model=RestoreMutationOut)
+async def restore_quest(game_id: int, quest_id: int):
+    result = await restore_deleted_quest(game_id, quest_id)
+    payload = RestoreMutationOut(**result)
+    if not payload.ok:
+        return _reason_json(404, payload.model_dump(mode="json"), payload.reason_code)
+    return payload
+
+
+@app.post("/api/games/{game_id}/threads/{thread_id}/restore", response_model=RestoreMutationOut)
+async def restore_thread(game_id: int, thread_id: int):
+    result = await restore_deleted_thread(game_id, thread_id)
+    payload = RestoreMutationOut(**result)
+    if not payload.ok:
+        return _reason_json(404, payload.model_dump(mode="json"), payload.reason_code)
+    return payload
 
 
 # ── Entities ──────────────────────────────────────────────────────────────────
@@ -441,6 +668,32 @@ async def create_entity(game_id: int, body: EntityCreate, db: AsyncSession = Dep
     await db.commit()
     await db.refresh(entity)
     return entity
+
+
+@app.get("/api/entities/{entity_id}", response_model=EntityOut)
+async def get_entity(entity_id: int, db: AsyncSession = Depends(get_db)):
+    from foundry_bridge.models import notes_entities_table
+
+    entity = await db.get(Entity, entity_id)
+    if entity is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    assoc = await db.execute(
+        sa.select(notes_entities_table.c.note_id)
+        .where(notes_entities_table.c.entity_id == entity_id)
+        .order_by(notes_entities_table.c.note_id.asc())
+    )
+    note_ids = [row[0] for row in assoc.all()]
+    return EntityOut(
+        id=entity.id,
+        game_id=entity.game_id,
+        entity_type=entity.entity_type,
+        name=entity.name,
+        description=entity.description,
+        note_ids=note_ids,
+        created_at=entity.created_at,
+        updated_at=entity.updated_at,
+    )
 
 
 @app.put("/api/entities/{entity_id}", response_model=EntityOut)

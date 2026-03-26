@@ -5,10 +5,12 @@ import { createLoot, deleteLoot, getLoot, getNotes, getQuests, updateLoot } from
 import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
 import type { Loot, Note, Quest } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 export default function LootTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: loot = [], isLoading } = useQuery({ queryKey: ['loot', gameId], queryFn: () => getLoot(gameId) })
+  const sortedLoot = sortByCreatedAtDesc(loot)
   const { data: quests = [] } = useQuery({ queryKey: ['quests', gameId], queryFn: () => getQuests(gameId) })
   const questMap = new Map((quests as Quest[]).map(q => [q.id, q]))
   const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
@@ -82,7 +84,7 @@ export default function LootTab({ gameId }: { gameId: number }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {loot.map((item: Loot) => (
+              {sortedLoot.map((item: Loot) => (
                 <tr key={item.id} className="hover:bg-gray-800/50">
                   <td className="px-4 py-3 text-amber-300 font-medium">
                     {item.item_name}
@@ -122,7 +124,7 @@ export default function LootTab({ gameId }: { gameId: number }) {
                       >—</button>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">{new Date(item.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 text-gray-500 text-xs">{formatTimestamp(item.created_at)}</td>
                   <td className="px-4 py-3">
                     <button onClick={() => confirm('Remove loot?') && deleteMut.mutate(item.id)}
                       className="text-gray-600 hover:text-red-400 transition-colors"><Trash2 size={13} /></button>

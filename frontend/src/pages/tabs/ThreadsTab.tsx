@@ -5,6 +5,7 @@ import { createThread, deleteThread, getNotes, getQuests, getThreads, updateThre
 import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
 import type { Note, Quest, Thread } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 export default function ThreadsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
@@ -20,6 +21,7 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
     queryKey: ['threads', gameId, resolved],
     queryFn: () => getThreads(gameId, resolved),
   })
+  const sortedThreads = sortByCreatedAtDesc(threads)
 
   const { data: quests = [] } = useQuery({
     queryKey: ['quests', gameId],
@@ -100,7 +102,7 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
         <p className="text-gray-500 text-sm">No {filter !== 'all' ? filter : ''} threads.</p>
       ) : (
         <div className="grid gap-3">
-          {threads.map((thread: Thread) => (
+          {sortedThreads.map((thread: Thread) => (
             <div key={thread.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
               {resolving === thread.id ? (
                 <div className="grid gap-3">
@@ -163,7 +165,7 @@ export default function ThreadsTab({ gameId }: { gameId: number }) {
                           <button onClick={() => setLinkingQuestFor(null)} className="text-xs text-gray-500 hover:text-gray-300">Cancel</button>
                         </div>
                       ) : null}
-                      <p className="text-xs text-gray-600 mt-1">{new Date(thread.created_at).toLocaleDateString()}</p>
+                      <p className="text-xs text-gray-600 mt-1">{formatTimestamp(thread.created_at)}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

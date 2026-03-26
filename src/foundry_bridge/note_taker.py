@@ -6,6 +6,7 @@ from datetime import datetime
 
 from langgraph.errors import GraphRecursionError
 
+from foundry_bridge.auditor import maybe_schedule_auto_audit
 from foundry_bridge.db import (
     _get_embed_model,
     _write_embeddings_for_pipeline_result,
@@ -17,6 +18,7 @@ from foundry_bridge.db import (
     upsert_player_characters,
     write_note_pipeline_result,
 )
+from foundry_bridge.locks import get_game_lock
 from foundry_bridge.note_generator import generate_note, validate_config
 
 logger = logging.getLogger(__name__)
@@ -24,8 +26,6 @@ logger = logging.getLogger(__name__)
 NOTE_CADENCE_MINUTES = int(os.getenv("NOTE_CADENCE_MINUTES", "10"))
 RECENT_NOTES_LIMIT = int(os.getenv("RECENT_NOTES_LIMIT", "3"))
 
-# Per-game asyncio locks; never evicted.
-_game_locks: dict[int, asyncio.Lock] = {}
 _task: asyncio.Task | None = None
 _inflight_tasks: set[asyncio.Task] = set()
 _UUID_RE = re.compile(
@@ -75,20 +75,25 @@ async def _polling_loop() -> None:
             poll_time = datetime.now().isoformat()
             game_ids = await get_game_ids_with_unprocessed_transcripts()
             locked_games = []
-            
+
             logger.info("[%s] Poll cycle: %d game(s) with unprocessed transcripts", poll_time, len(game_ids))
-            
+
             for gid in game_ids:
-                lock = _game_locks.setdefault(gid, asyncio.Lock())
+                lock = get_game_lock(gid)
                 if lock.locked():
                     locked_games.append(gid)
                     continue
                 t = asyncio.create_task(_run_pipeline_locked(gid, lock))
                 _inflight_tasks.add(t)
                 t.add_done_callback(_inflight_tasks.discard)
-            
+
             if locked_games:
-                logger.info("[%s] Skipped %d game(s) due to in-progress pipelines: %s", poll_time, len(locked_games), locked_games)
+                logger.info(
+                    "[%s] Skipped %d game(s) due to in-progress pipelines: %s",
+                    poll_time,
+                    len(locked_games),
+                    locked_games,
+                )
         except Exception:
             logger.exception("Error in note taker polling loop")
         next_poll_seconds = NOTE_CADENCE_MINUTES * 60
@@ -97,19 +102,39 @@ async def _polling_loop() -> None:
 
 
 async def _run_pipeline_locked(game_id: int, lock: asyncio.Lock) -> None:
+    note_stored = False
     async with lock:
         try:
-            await _run_pipeline(game_id)
+            note_stored = await _run_pipeline(game_id)
         except Exception:
             logger.exception("Pipeline error for game %d", game_id)
+
+    # Schedule auto-audit only after releasing the shared game lock; otherwise
+    # trigger_audit_run can immediately report conflict_running.
+    if note_stored:
+        try:
+            trigger = await maybe_schedule_auto_audit(game_id)
+            logger.info(
+                "Auto-audit evaluation: game_id=%d ok=%s noop=%s reason_code=%s run_id=%s",
+                game_id,
+                trigger.ok,
+                trigger.noop,
+                trigger.reason_code,
+                trigger.audit_run_id,
+            )
+        except Exception:
+            logger.exception(
+                "Auto-audit scheduling failed after note pipeline completion (game_id=%d)",
+                game_id,
+            )
 
 
 # ── Pipeline ───────────────────────────────────────────────────────────────────
 
-async def _run_pipeline(game_id: int) -> None:
+async def _run_pipeline(game_id: int) -> bool:
     transcripts = await get_unprocessed_transcripts_for_game(game_id)
     if not transcripts:
-        return
+        return False
 
     # Filter out UUID-like character names (fallback from server.py)
     pc_names = list(set(
@@ -143,7 +168,7 @@ async def _run_pipeline(game_id: int) -> None:
             "Note generation aborted (recursion limit) for game %d; will retry on next poll",
             game_id,
         )
-        return  # transcripts NOT marked processed — will retry
+        return False  # transcripts NOT marked processed — will retry
 
     source_ids = [t.id for t in transcripts]
     # Coerce thread_resolutions keys from str to int (JSON only supports string keys)
@@ -168,5 +193,7 @@ async def _run_pipeline(game_id: int) -> None:
         quests_updated=[q.model_dump() for q in note_output.quests_updated],
     )
     await _write_embeddings_for_pipeline_result(pipeline_result)
+
     end_time = datetime.now().isoformat()
     logger.info("[%s] Note stored for game %d (completion time: %s)", end_time, game_id, end_time)
+    return True

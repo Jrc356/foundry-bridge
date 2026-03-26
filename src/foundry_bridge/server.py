@@ -10,7 +10,7 @@ from typing import Optional
 import uvicorn
 from websockets.asyncio.server import ServerConnection, serve
 
-from foundry_bridge import note_taker, transcriber
+from foundry_bridge import auditor, note_taker, transcriber
 from foundry_bridge.api import app as fastapi_app
 from foundry_bridge.db import get_or_create_game
 
@@ -66,11 +66,11 @@ async def handle_json_message(state: ConnectionState, data: dict) -> None:
     state.last_activity_time = time.time()  # Update activity tracking
     msg_type = data.get("type")
     logger.debug("Received message type=%r from client %s", msg_type, state.client_id)
-    
+
     if msg_type == "audio":
         state.last_audio_header = data
         return
-    
+
     if msg_type == "game_identify":
         hostname = data.get("hostname", "")
         world_id = data.get("world_id", "")
@@ -93,7 +93,7 @@ async def handle_json_message(state: ConnectionState, data: dict) -> None:
                 "reason": "hostname and world_id are required",
             })
         return  # do not pass game_identify to transcriber
-    
+
     # Validate that game_id is set before processing other events
     if state.game_id is None:
         logger.warning(
@@ -106,7 +106,7 @@ async def handle_json_message(state: ConnectionState, data: dict) -> None:
             "message": "game_id not set; send game_identify first",
         })
         return
-    
+
     # Validate participant_attached messages
     if msg_type == "participant_attached":
         participant_id = data.get("participantId")
@@ -130,7 +130,7 @@ async def handle_json_message(state: ConnectionState, data: dict) -> None:
             name,
             state.game_id,
         )
-    
+
     await transcriber.handle_event(data)
 
 
@@ -204,12 +204,12 @@ async def _monitor_connection_timeouts() -> None:
             await asyncio.sleep(10)  # Check every 10 seconds
             now = time.time()
             timed_out = []
-            
+
             for ws, state in list(connection_states.items()):
                 idle_time = now - state.last_activity_time
                 if idle_time > CONNECTION_TIMEOUT_SECS:
                     timed_out.append((ws, state.client_id, idle_time))
-            
+
             for ws, client_id, idle_time in timed_out:
                 logger.warning(
                     "Connection timeout: client=%s idle_time=%.1fs",
@@ -263,6 +263,7 @@ async def _main() -> None:
 
     await transcriber.init()
     note_taker.start_background_tasks()
+    auditor.start_background_tasks()
 
     loop = asyncio.get_running_loop()
 
@@ -274,6 +275,7 @@ async def _main() -> None:
             logger.info("WebSocket server closed")
         api_server.should_exit = True
         await note_taker.stop_background_tasks()
+        await auditor.stop_background_tasks()
         await transcriber.shutdown()
 
     loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_handle_signal()))

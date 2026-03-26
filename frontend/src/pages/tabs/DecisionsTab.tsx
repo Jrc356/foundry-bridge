@@ -5,10 +5,12 @@ import { createDecision, deleteDecision, getDecisions, getNotes } from '../../ap
 import { TabHeader } from '../../components/TabHeader'
 import { NotesBadge } from '../../components/NotesBadge'
 import type { Decision, Note } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 export default function DecisionsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: decisions = [], isLoading } = useQuery({ queryKey: ['decisions', gameId], queryFn: () => getDecisions(gameId) })
+  const sortedDecisions = sortByCreatedAtDesc(decisions)
   const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ note_id: 0, decision: '', made_by: '' })
@@ -77,14 +79,14 @@ export default function DecisionsTab({ gameId }: { gameId: number }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {decisions.map((d: Decision) => (
+              {sortedDecisions.map((d: Decision) => (
                 <tr key={d.id} className="hover:bg-gray-800/50">
                   <td className="px-4 py-3 text-gray-200">
                     {d.decision}
                     <NotesBadge notes={(notes as Note[]).filter(n => n.id === d.note_id)} />
                   </td>
                   <td className="px-4 py-3 text-purple-300">{d.made_by}</td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">{new Date(d.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 text-gray-500 text-xs">{formatTimestamp(d.created_at)}</td>
                   <td className="px-4 py-3">
                     <button onClick={() => confirm('Delete decision?') && deleteMut.mutate(d.id)}
                       className="text-gray-600 hover:text-red-400 transition-colors"><Trash2 size={13} /></button>

@@ -5,10 +5,12 @@ import { createEvent, deleteEvent, getEvents, getNotes } from '../../api'
 import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
 import type { Event, Note } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 export default function EventsTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: events = [], isLoading } = useQuery({ queryKey: ['events', gameId], queryFn: () => getEvents(gameId) })
+  const sortedEvents = sortByCreatedAtDesc(events)
   const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
   const [showAdd, setShowAdd] = useState(false)
   const [text, setText] = useState('')
@@ -58,11 +60,11 @@ export default function EventsTab({ gameId }: { gameId: number }) {
         <p className="text-gray-500 text-sm">No events recorded.</p>
       ) : (
         <div className="grid gap-2">
-          {events.map((event: Event) => (
+          {sortedEvents.map((event: Event) => (
             <div key={event.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 flex items-start justify-between gap-4">
               <div>
                 <p className="text-sm text-gray-200">{event.text}</p>
-                <p className="text-xs text-gray-500 mt-1">{new Date(event.created_at).toLocaleDateString()}</p>
+                <p className="text-xs text-gray-500 mt-1">{formatTimestamp(event.created_at)}</p>
                 <NotesBadge notes={(notes as Note[]).filter(n => event.note_ids.includes(n.id))} />
               </div>
               <button onClick={() => confirm('Delete event?') && deleteMut.mutate(event.id)}

@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -17,7 +17,7 @@ from sqlalchemy import (
     false,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 VECTOR_DIM = 768
@@ -85,6 +85,9 @@ class Note(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    is_audit: Mapped[bool] = mapped_column(
+        Boolean, server_default=false(), nullable=False
+    )
     embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
 
@@ -127,6 +130,11 @@ class Thread(Base):
     opened_by_note_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("notes.id"), nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     quest_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("quests.id"), nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean, server_default=false(), nullable=False
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -211,6 +219,11 @@ class Quest(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean, server_default=false(), nullable=False
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
 
     __table_args__ = (
@@ -233,6 +246,83 @@ class QuestDescriptionHistory(Base):
     note_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AuditRun(Base):
+    __tablename__ = "audit_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    game_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("games.id"), nullable=False)
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="running"
+    )
+    trigger_source: Mapped[str] = mapped_column(String(20), nullable=False)
+    notes_audited: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, server_default=sa.text("'{}'")
+    )
+    notes_audited_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    min_note_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    max_note_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    audit_note_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("notes.id"), nullable=True
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "status IN ('running', 'completed', 'failed')",
+            name="ck_audit_runs_status",
+        ),
+        sa.CheckConstraint(
+            "trigger_source IN ('auto', 'manual')",
+            name="ck_audit_runs_trigger_source",
+        ),
+        sa.Index("ix_audit_runs_game_id", "game_id"),
+        sa.Index("ix_audit_runs_status", "status"),
+        sa.Index(
+            "uq_audit_runs_game_one_running",
+            "game_id",
+            unique=True,
+            postgresql_where=sa.text("status = 'running'"),
+        ),
+    )
+
+
+class AuditFlag(Base):
+    __tablename__ = "audit_flags"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    game_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("games.id"), nullable=False)
+    audit_run_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("audit_runs.id"), nullable=False
+    )
+    flag_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    target_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_change: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="pending"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "status IN ('pending', 'applied', 'dismissed')",
+            name="ck_audit_flags_status",
+        ),
+        sa.Index("ix_audit_flags_game_id_status", "game_id", "status"),
+        sa.Index("ix_audit_flags_audit_run_id", "audit_run_id"),
     )
 
 

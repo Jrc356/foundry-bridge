@@ -4,10 +4,12 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { createGame, deleteGame, getGames } from '../api'
 import type { Game } from '../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../utils/datetime'
 
 export default function GameList() {
   const qc = useQueryClient()
   const { data: games = [], isLoading } = useQuery({ queryKey: ['games'], queryFn: getGames })
+  const sortedGames = sortByCreatedAtDesc(games)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ name: '', hostname: '', world_id: '' })
 
@@ -73,12 +75,12 @@ export default function GameList() {
           </div>
         ) : (
           <div className="grid gap-4">
-            {games.map((game: Game) => (
+            {sortedGames.map((game: Game) => (
               <div key={game.id} className="bg-gray-800 rounded-xl border border-gray-700 p-5 flex items-center justify-between hover:border-purple-700 transition-colors">
                 <Link to={`/games/${game.id}`} className="flex-1 min-w-0">
                   <div className="font-semibold text-white truncate">{game.name}</div>
                   <div className="text-xs text-gray-400 mt-1">{game.hostname} · {game.world_id}</div>
-                  <div className="text-xs text-gray-500 mt-1">{new Date(game.created_at).toLocaleDateString()}</div>
+                  <div className="text-xs text-gray-500 mt-1">{formatTimestamp(game.created_at)}</div>
                 </Link>
                 <button
                   onClick={() => confirm(`Delete "${game.name}"?`) && deleteMut.mutate(game.id)}

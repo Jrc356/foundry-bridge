@@ -4,10 +4,12 @@ import { deleteQuote, getNotes, getQuotes } from '../../api'
 import { NotesBadge } from '../../components/NotesBadge'
 import { TabHeader } from '../../components/TabHeader'
 import type { ImportantQuote, Note } from '../../types'
+import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
 
 export default function QuotesTab({ gameId }: { gameId: number }) {
   const qc = useQueryClient()
   const { data: quotes = [], isLoading } = useQuery({ queryKey: ['quotes', gameId], queryFn: () => getQuotes(gameId) })
+  const sortedQuotes = sortByCreatedAtDesc(quotes)
   const { data: notes = [] } = useQuery({ queryKey: ['notes', gameId], queryFn: () => getNotes(gameId) })
 
   const deleteMut = useMutation({
@@ -25,12 +27,12 @@ export default function QuotesTab({ gameId }: { gameId: number }) {
         <p className="text-gray-500 text-sm">No quotes recorded.</p>
       ) : (
         <div className="grid gap-3">
-          {quotes.map((q: ImportantQuote) => (
+          {sortedQuotes.map((q: ImportantQuote) => (
             <div key={q.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 flex items-start justify-between gap-4">
               <div className="flex-1 border-l-2 border-blue-600 pl-3">
                 <p className="text-gray-200 italic">"{q.text}"</p>
                 {q.speaker && <p className="text-sm text-blue-400 mt-1">— {q.speaker}</p>}
-                <p className="text-xs text-gray-600 mt-1">{new Date(q.created_at).toLocaleDateString()}</p>
+                <p className="text-xs text-gray-600 mt-1">{formatTimestamp(q.created_at)}</p>
                 <NotesBadge notes={(notes as Note[]).filter(n => n.id === q.note_id)} />
               </div>
               <button onClick={() => confirm('Delete quote?') && deleteMut.mutate(q.id)}
