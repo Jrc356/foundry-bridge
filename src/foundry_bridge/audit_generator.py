@@ -38,13 +38,24 @@ Available tools:
 - get_all_entities
 - get_all_quests
 - get_all_open_threads
+- get_entity_by_id
+- get_thread_by_id
+- get_quest_by_id
+- get_event_by_id
+- get_decision_by_id
+- get_loot_by_id
+- get_note_by_id
+- get_combat_by_id
+- get_quote_by_id
+- get_transcript_by_id
 
 REQUIRED tool-use rules:
 - Lookup before create: before proposing any item in new_entities/new_events/new_decisions/
   new_loot/new_quests/new_threads/new_quotes/new_combat, call the corresponding search
   tools first to verify it does not already exist.
 - Verify IDs before correction/delete: before any correction/update/resolution that targets
-  an existing row by ID, call the relevant search/list tool and confirm the ID exists.
+    an existing row by ID, call the relevant search/list or get_*_by_id tool and confirm
+    the ID exists.
   Never invent IDs.
 - Quest ID resolution: any quest_id you output (for new_threads/new_loot/corrections) MUST
   be resolved via search_quests. Do not guess quest IDs.

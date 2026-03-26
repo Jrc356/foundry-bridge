@@ -243,6 +243,96 @@ async def get_events_for_game(game_id: int) -> list[Event]:
         return list(result.scalars().all())
 
 
+async def get_entity_for_game_by_id(game_id: int, entity_id: int) -> Optional[Entity]:
+    """Return an entity by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        entity = await session.get(Entity, entity_id)
+        if entity is None or entity.game_id != game_id:
+            return None
+        return entity
+
+
+async def get_thread_for_game_by_id(game_id: int, thread_id: int) -> Optional[Thread]:
+    """Return a thread by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        thread = await session.get(Thread, thread_id)
+        if thread is None or thread.game_id != game_id:
+            return None
+        return thread
+
+
+async def get_quest_for_game_by_id(game_id: int, quest_id: int) -> Optional[Quest]:
+    """Return a quest by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        quest = await session.get(Quest, quest_id)
+        if quest is None or quest.game_id != game_id:
+            return None
+        return quest
+
+
+async def get_event_for_game_by_id(game_id: int, event_id: int) -> Optional[Event]:
+    """Return an event by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        event = await session.get(Event, event_id)
+        if event is None or event.game_id != game_id:
+            return None
+        return event
+
+
+async def get_decision_for_game_by_id(game_id: int, decision_id: int) -> Optional[Decision]:
+    """Return a decision by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        decision = await session.get(Decision, decision_id)
+        if decision is None or decision.game_id != game_id:
+            return None
+        return decision
+
+
+async def get_loot_for_game_by_id(game_id: int, loot_id: int) -> Optional[Loot]:
+    """Return loot by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        loot = await session.get(Loot, loot_id)
+        if loot is None or loot.game_id != game_id:
+            return None
+        return loot
+
+
+async def get_note_for_game_by_id(game_id: int, note_id: int) -> Optional[Note]:
+    """Return a note by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        note = await session.get(Note, note_id)
+        if note is None or note.game_id != game_id:
+            return None
+        return note
+
+
+async def get_combat_for_game_by_id(game_id: int, combat_id: int) -> Optional[CombatUpdate]:
+    """Return a combat row by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        combat = await session.get(CombatUpdate, combat_id)
+        if combat is None or combat.game_id != game_id:
+            return None
+        return combat
+
+
+async def get_quote_for_game_by_id(game_id: int, quote_id: int) -> Optional[ImportantQuote]:
+    """Return an important quote by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        quote = await session.get(ImportantQuote, quote_id)
+        if quote is None or quote.game_id != game_id:
+            return None
+        return quote
+
+
+async def get_transcript_for_game_by_id(game_id: int, transcript_id: int) -> Optional[Transcript]:
+    """Return a transcript row by ID scoped to game_id, or None if missing/out-of-game."""
+    async with AsyncSessionLocal() as session:
+        transcript = await session.get(Transcript, transcript_id)
+        if transcript is None or transcript.game_id != game_id:
+            return None
+        return transcript
+
+
 async def get_last_audit_run_for_game(game_id: int) -> Optional[AuditRun]:
     """Return the most recent completed audit run for a game."""
     async with AsyncSessionLocal() as session:

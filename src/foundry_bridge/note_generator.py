@@ -34,6 +34,8 @@ Use the following tools to look up relevant campaign history on demand:
 - `search_decisions`: Find past party decisions
 - `search_loot`: Find previously acquired loot or items
 - `search_combat`: Find past combat encounters
+- `get_*_by_id`: Fetch a specific existing record by ID for exact verification
+    (entity/thread/quest/event/decision/loot/note/combat/quote/transcript)
 
 REQUIRED tool-use rules:
 - Before outputting any quest in `quests_opened`, you MUST call `search_quests` to check if
@@ -48,6 +50,8 @@ REQUIRED tool-use rules:
   to check if it already exists. If found, write a single updated description that
   incorporates both the prior description and any new information from this session.
   Do NOT omit previously known details — only add to or refine them.
+- If you already have a numeric ID and need exact verification, call the matching
+    `get_*_by_id` tool before relying on that ID in output.
 - Avoid calling the same tool with identical queries twice. Use prior tool results
   instead of re-searching.
 
@@ -129,8 +133,12 @@ class _EntitySearchInput(BaseModel):
     )
 
 
+class _IdInput(BaseModel):
+    record_id: int = PydanticField(description="Exact DB row ID to fetch for this game")
+
+
 def make_game_tools(game_id: int) -> list:
-    """Return the 8 search tools bound to a specific game_id."""
+    """Return search and exact-ID lookup tools bound to a specific game_id."""
 
     async def search_quests(query: str) -> str:
         start_time = time.time()
@@ -483,6 +491,150 @@ def make_game_tools(game_id: int) -> list:
             )
             return f"Error searching combat: {str(e)}"
 
+    async def _lookup_by_id(
+        *,
+        tool_name: str,
+        record_id: int,
+        fetcher,
+        formatter,
+        not_found_message: str,
+    ) -> str:
+        start_time = time.time()
+        logger.debug("%s invoked", tool_name, extra={"game_id": game_id, "record_id": record_id})
+        try:
+            row = await fetcher(game_id, record_id)
+            elapsed = time.time() - start_time
+            if row is None:
+                logger.info(
+                    "%s returned no result",
+                    tool_name,
+                    extra={"game_id": game_id, "record_id": record_id, "elapsed_sec": elapsed},
+                )
+                return not_found_message
+            logger.info(
+                "%s succeeded",
+                tool_name,
+                extra={"game_id": game_id, "record_id": record_id, "elapsed_sec": elapsed},
+            )
+            return formatter(row)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                "%s failed",
+                tool_name,
+                exc_info=True,
+                extra={"game_id": game_id, "record_id": record_id, "elapsed_sec": elapsed, "error": str(e)},
+            )
+            return f"Error in {tool_name}: {str(e)}"
+
+    async def get_entity_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_entity_by_id",
+            record_id=record_id,
+            fetcher=db.get_entity_for_game_by_id,
+            formatter=lambda row: f"ID {row.id} [{row.entity_type}] {row.name}: {row.description}",
+            not_found_message="Entity not found for this game.",
+        )
+
+    async def get_thread_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_thread_by_id",
+            record_id=record_id,
+            fetcher=db.get_thread_for_game_by_id,
+            formatter=lambda row: (
+                f"ID {row.id} [resolved={row.is_resolved} deleted={row.is_deleted}] "
+                f"quest_id={row.quest_id} opened_by_note_id={row.opened_by_note_id} "
+                f"resolved_by_note_id={row.resolved_by_note_id} text={row.text} "
+                f"resolution={row.resolution or ''}"
+            ),
+            not_found_message="Thread not found for this game.",
+        )
+
+    async def get_quest_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_quest_by_id",
+            record_id=record_id,
+            fetcher=db.get_quest_for_game_by_id,
+            formatter=lambda row: (
+                f"ID {row.id} [{row.status}] deleted={row.is_deleted} giver_entity_id={row.quest_giver_entity_id} "
+                f"name={row.name} description={row.description}"
+            ),
+            not_found_message="Quest not found for this game.",
+        )
+
+    async def get_event_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_event_by_id",
+            record_id=record_id,
+            fetcher=db.get_event_for_game_by_id,
+            formatter=lambda row: f"ID {row.id}: {row.text}",
+            not_found_message="Event not found for this game.",
+        )
+
+    async def get_decision_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_decision_by_id",
+            record_id=record_id,
+            fetcher=db.get_decision_for_game_by_id,
+            formatter=lambda row: f"ID {row.id} note_id={row.note_id} made_by={row.made_by}: {row.decision}",
+            not_found_message="Decision not found for this game.",
+        )
+
+    async def get_loot_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_loot_by_id",
+            record_id=record_id,
+            fetcher=db.get_loot_for_game_by_id,
+            formatter=lambda row: (
+                f"ID {row.id} quest_id={row.quest_id} acquired_by={row.acquired_by}: {row.item_name}"
+            ),
+            not_found_message="Loot not found for this game.",
+        )
+
+    async def get_note_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_note_by_id",
+            record_id=record_id,
+            fetcher=db.get_note_for_game_by_id,
+            formatter=lambda row: (
+                f"ID {row.id} is_audit={row.is_audit} source_transcript_ids={row.source_transcript_ids} "
+                f"summary={row.summary}"
+            ),
+            not_found_message="Note not found for this game.",
+        )
+
+    async def get_combat_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_combat_by_id",
+            record_id=record_id,
+            fetcher=db.get_combat_for_game_by_id,
+            formatter=lambda row: f"ID {row.id} note_id={row.note_id} encounter={row.encounter} outcome={row.outcome}",
+            not_found_message="Combat row not found for this game.",
+        )
+
+    async def get_quote_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_quote_by_id",
+            record_id=record_id,
+            fetcher=db.get_quote_for_game_by_id,
+            formatter=lambda row: (
+                f"ID {row.id} note_id={row.note_id} transcript_id={row.transcript_id} "
+                f"speaker={row.speaker or ''} text={row.text}"
+            ),
+            not_found_message="Important quote not found for this game.",
+        )
+
+    async def get_transcript_by_id(record_id: int) -> str:
+        return await _lookup_by_id(
+            tool_name="get_transcript_by_id",
+            record_id=record_id,
+            fetcher=db.get_transcript_for_game_by_id,
+            formatter=lambda row: (
+                f"ID {row.id} turn_index={row.turn_index} speaker={row.character_name} text={row.text}"
+            ),
+            not_found_message="Transcript not found for this game.",
+        )
+
     return [
         StructuredTool.from_function(
             coroutine=search_quests,
@@ -537,6 +689,66 @@ def make_game_tools(game_id: int) -> list:
             name="search_combat",
             description="Find past combat encounters.",
             args_schema=_SearchInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_entity_by_id,
+            name="get_entity_by_id",
+            description="Fetch a specific entity by ID for exact verification.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_thread_by_id,
+            name="get_thread_by_id",
+            description="Fetch a specific thread by ID, including resolved/deleted state.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_quest_by_id,
+            name="get_quest_by_id",
+            description="Fetch a specific quest by ID, including status and deleted state.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_event_by_id,
+            name="get_event_by_id",
+            description="Fetch a specific event by ID.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_decision_by_id,
+            name="get_decision_by_id",
+            description="Fetch a specific decision by ID.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_loot_by_id,
+            name="get_loot_by_id",
+            description="Fetch a specific loot row by ID.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_note_by_id,
+            name="get_note_by_id",
+            description="Fetch a specific note by ID, including source transcript IDs.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_combat_by_id,
+            name="get_combat_by_id",
+            description="Fetch a specific combat row by ID.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_quote_by_id,
+            name="get_quote_by_id",
+            description="Fetch a specific important quote by ID.",
+            args_schema=_IdInput,
+        ),
+        StructuredTool.from_function(
+            coroutine=get_transcript_by_id,
+            name="get_transcript_by_id",
+            description="Fetch a specific transcript row by ID.",
+            args_schema=_IdInput,
         ),
     ]
 
