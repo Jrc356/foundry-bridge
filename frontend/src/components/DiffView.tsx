@@ -31,7 +31,6 @@ const META_FIELDS = new Set([
   'duplicate_id',
 ])
 
-const MAX_VALUE_LENGTH = 60
 const INITIAL_UNCHANGED_ROWS = 3
 
 function formatValue(value: unknown): string {
@@ -46,11 +45,6 @@ function formatValue(value: unknown): string {
   } catch {
     return String(value)
   }
-}
-
-function truncateValue(value: string): string {
-  if (value.length <= MAX_VALUE_LENGTH) return value
-  return `${value.slice(0, MAX_VALUE_LENGTH - 1)}…`
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -88,16 +82,14 @@ function rowToneClass(tone: RowTone): string {
 }
 
 function DiffRowLine({ row }: { row: DiffRow }) {
-  const displayValue = truncateValue(row.value)
-
   return (
     <div className={`grid grid-cols-[1.25rem,minmax(8rem,12rem),minmax(0,1fr)] gap-2 font-mono text-xs ${rowToneClass(row.tone)}`}>
       <span className="text-center select-none">{row.sigil}</span>
       <span className="truncate" title={row.keyName}>
         {row.keyName}
       </span>
-      <span className="truncate" title={row.value}>
-        {displayValue}
+      <span className="whitespace-pre-wrap break-words" title={row.value}>
+        {row.value}
       </span>
     </div>
   )
