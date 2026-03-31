@@ -77,6 +77,15 @@ services:
       retries: 3
       start_period: 30s
 
+  tunnel:
+    container_name: cloudflared-tunnel
+    image: cloudflare/cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+
+
 volumes:
   postgres_data:
   fastembed_cache:
