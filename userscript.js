@@ -213,10 +213,8 @@
     return false;
   }
 
-  function sendAudioFrame(meta, pcm16, wsRef) {
-    // Use provided ws reference or fall back to global (for backward compatibility)
-    const targetWs = wsRef || ws;
-    if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+  function sendAudioFrame(meta, pcm16) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       return false;
     }
 
@@ -273,21 +271,21 @@
       state.source = null;
     }
 
-    if (state.mst) {
+    // Remove track onended handler before nulling mst, but do NOT stop() the track —
+    // it is owned by LiveKit and stopping it permanently kills the audio pipeline.
+    if (state.trackEndedHandler && state.mst) {
       try {
-        state.mst.stop();
-      } catch (e) {
-        // Track may already be stopped, which is fine
-      }
-      state.mst = null;
-    }
-
-    // Remove track onended handler if present
-    if (state.trackEndedHandler) {
-      try {
-        if (state.mst) state.mst.removeEventListener('ended', state.trackEndedHandler);
+        state.mst.removeEventListener('ended', state.trackEndedHandler);
       } catch (e) {}
-      state.trackEndedHandler = null;
+    }
+    state.trackEndedHandler = null;
+    state.mst = null;
+
+    if (state.silentGain) {
+      try {
+        state.silentGain.disconnect();
+      } catch (e) {}
+      state.silentGain = null;
     }
 
     state.audioCleanedUp = true;
@@ -425,6 +423,9 @@
       const source = audioCtx.createMediaStreamSource(stream);
       const processor = audioCtx.createScriptProcessor(CONFIG.BUFFER_SIZE, 1, 1);
 
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+
       const state = {
         participantId,
         participant,
@@ -433,7 +434,7 @@
         stream,
         source,
         processor,
-        wsRef: ws, // Store reference to current WebSocket
+        silentGain,
         sentFrames: 0,
         skippedFrames: 0,
         audioCleanedUp: false,
@@ -443,7 +444,7 @@
       processor.onaudioprocess = (event) => {
         try {
           if (!bridgeState.running) return;
-          if (!state.wsRef || state.wsRef.readyState !== WebSocket.OPEN) return;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
           if (!shouldSendAudioFrame(state)) {
             state.skippedFrames++;
             return;
@@ -451,7 +452,7 @@
 
           const input = event.inputBuffer.getChannelData(0);
           const pcm16 = float32ToPCM16(input);
-          const sent = sendAudioFrame(state.meta, pcm16, state.wsRef);
+          const sent = sendAudioFrame(state.meta, pcm16);
           if (sent) {
             state.sentFrames++;
           }
@@ -474,7 +475,8 @@
       mst.addEventListener('ended', trackEndedHandler);
 
       source.connect(processor);
-      processor.connect(audioCtx.destination);
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
       activeParticipants.set(participantId, state);
 

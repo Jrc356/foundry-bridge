@@ -32,6 +32,7 @@ class ConnectionState:
     last_audio_header: Optional[dict] = None
     game_id: Optional[int] = None
     last_activity_time: float = field(default_factory=time.time)  # Track idle time
+    participant_ids: set[str] = field(default_factory=set)
 
 
 connection_states: dict[ServerConnection, ConnectionState] = {}
@@ -56,10 +57,12 @@ async def register_connection(ws: ServerConnection) -> ConnectionState:
 async def unregister_connection(ws: ServerConnection) -> None:
     state = connection_states.pop(ws, None)
     if state:
-        await transcriber.handle_event({
-            "type": "participant_detached",
-            "participantId": state.client_id,
-        })
+        ids_to_close = state.participant_ids if state.participant_ids else {state.client_id}
+        for pid in ids_to_close:
+            await transcriber.handle_event({
+                "type": "participant_detached",
+                "participantId": pid,
+            })
 
 
 async def handle_json_message(state: ConnectionState, data: dict) -> None:
@@ -154,10 +157,12 @@ async def handle_binary_message(state: ConnectionState, payload: bytes) -> None:
         logger.warning("Audio frame has no character_name fallback; using client_id")
         _char_name = state.client_id
 
+    _participant_id = str(header.get("participantId") or state.client_id)
+    state.participant_ids.add(_participant_id)
     out_header = {
         **header,
         "character_name": _char_name,
-        "participantId": state.client_id,
+        "participantId": _participant_id,
     }
 
     logger.debug(
