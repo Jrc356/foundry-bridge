@@ -173,10 +173,10 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
         eot_timeout_ms="2000",
     ) as connection:
         def on_open(_: Any) -> None:
-            logger.info("[%s] Deepgram connection opened", label)
+            logger.debug("[%s] Deepgram connection opened", label)
 
         def on_close(_: Any) -> None:
-            logger.info("[%s] Deepgram connection closed", label)
+            logger.debug("[%s] Deepgram connection closed", label)
 
         def on_error(error: Any) -> None:
             logger.warning("[%s] Deepgram error: %s", label, error)
@@ -186,7 +186,7 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
                 transcript = getattr(message, "transcript", "") or ""
                 event_name = getattr(message, "event", "")
                 if transcript.strip():
-                    logger.info(
+                    logger.debug(
                         "[%s] event=%s turn=%s confidence=%.2f transcript=%s",
                         label, event_name,
                         getattr(message, "turn_index", "?"),
