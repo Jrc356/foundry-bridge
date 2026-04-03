@@ -209,6 +209,27 @@ async def get_entities_for_game(game_id: int) -> list[Entity]:
         return list(result.scalars().all())
 
 
+async def get_keyterms_for_game(game_id: int) -> list[str]:
+    """Return deduplicated keyterms (character + entity names) for Deepgram keyterm prompting."""
+    async with AsyncSessionLocal() as session:
+        pc_result = await session.execute(
+            sa.select(PlayerCharacter.character_name).where(PlayerCharacter.game_id == game_id)
+        )
+        entity_result = await session.execute(
+            sa.select(Entity.name).where(Entity.game_id == game_id)
+        )
+        names: list[str] = [r for (r,) in pc_result.all()] + [r for (r,) in entity_result.all()]
+        seen: set[str] = set()
+        unique: list[str] = []
+        for name in names:
+            key = name.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(name)
+        # Stay well under Deepgram's 500-token limit (cap at 100 terms)
+        return unique[:100]
+
+
 async def get_quests_for_game(game_id: int) -> list[Quest]:
     """Return all non-deleted quests for a game."""
     async with AsyncSessionLocal() as session:

@@ -426,6 +426,13 @@
       const silentGain = audioCtx.createGain();
       silentGain.gain.value = 0;
 
+      // Pre-roll ring buffer: keep ~200ms of audio before speech starts so the
+      // first syllable isn't clipped when LiveKit's VAD fires slightly late.
+      // At BUFFER_SIZE=4096 and SAMPLE_RATE=48000 each frame is ~85ms,
+      // so 3 frames ≈ 255ms of look-back.
+      const PREROLL_FRAMES = 3;
+      const prerollBuffer = [];
+
       const state = {
         participantId,
         participant,
@@ -439,19 +446,38 @@
         skippedFrames: 0,
         audioCleanedUp: false,
         trackEndedHandler: null,
+        wasSpeaking: false,
       };
 
       processor.onaudioprocess = (event) => {
         try {
           if (!bridgeState.running) return;
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          if (!shouldSendAudioFrame(state)) {
-            state.skippedFrames++;
-            return;
-          }
 
           const input = event.inputBuffer.getChannelData(0);
           const pcm16 = float32ToPCM16(input);
+
+          if (!shouldSendAudioFrame(state)) {
+            // Not speaking — rotate into pre-roll buffer
+            prerollBuffer.push(pcm16);
+            if (prerollBuffer.length > PREROLL_FRAMES) {
+              prerollBuffer.shift();
+            }
+            state.skippedFrames++;
+            state.wasSpeaking = false;
+            return;
+          }
+
+          // Speaking — flush pre-roll frames on the false→true transition
+          if (!state.wasSpeaking) {
+            for (const buffered of prerollBuffer) {
+              sendAudioFrame(state.meta, buffered);
+              state.sentFrames++;
+            }
+            prerollBuffer.length = 0;
+            state.wasSpeaking = true;
+          }
+
           const sent = sendAudioFrame(state.meta, pcm16);
           if (sent) {
             state.sentFrames++;

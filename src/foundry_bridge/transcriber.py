@@ -10,11 +10,12 @@ from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
 from deepgram.listen.v2.types import ListenV2TurnInfo
 
-from foundry_bridge.db import store_transcript
+from foundry_bridge.db import get_keyterms_for_game, store_transcript
 
 logger = logging.getLogger(__name__)
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
+DEEPGRAM_EOT_TIMEOUT_MS: str = os.environ.get("DEEPGRAM_EOT_TIMEOUT_MS", "3000")
 
 # Module-level reconnect constants
 RECONNECT_INITIAL_DELAY: float = 1.0   # seconds
@@ -32,6 +33,7 @@ class SpeakerWorker:
     sample_rate: int
     channels: int
     game_id: int
+    keyterms: list[str] = field(default_factory=list)
     queue: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
     task: Optional[asyncio.Task] = None
     turn_started_at: Optional[datetime] = None
@@ -99,16 +101,21 @@ async def _ensure_speaker_worker(
     if existing is not None:
         return existing
 
+    keyterms = await get_keyterms_for_game(game_id)
     worker = SpeakerWorker(
         participant_id=participant_id,
         label=label,
         sample_rate=sample_rate,
         channels=channels,
         game_id=game_id,
+        keyterms=keyterms,
     )
     worker.task = asyncio.create_task(_speaker_loop(worker))
     _speaker_workers[participant_id] = worker
-    logger.info("Started speaker worker for %s (%s)", label, participant_id)
+    logger.info(
+        "Started speaker worker for %s (%s) with %d keyterms",
+        label, participant_id, len(keyterms),
+    )
     return worker
 
 
@@ -174,7 +181,8 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
         model="flux-general-en",
         encoding="linear16",
         sample_rate=f"{worker.sample_rate}",
-        eot_timeout_ms="2000",
+        eot_timeout_ms=DEEPGRAM_EOT_TIMEOUT_MS,
+        keyterm=worker.keyterms or None,
     ) as connection:
         def on_open(_: Any) -> None:
             logger.debug("[%s] Deepgram connection opened", label)
