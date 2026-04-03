@@ -3,6 +3,7 @@ import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from deepgram import AsyncDeepgramClient
@@ -33,6 +34,7 @@ class SpeakerWorker:
     game_id: int
     queue: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
     task: Optional[asyncio.Task] = None
+    turn_started_at: Optional[datetime] = None
 
 
 async def init() -> None:
@@ -166,6 +168,8 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
     label = worker.label
     assert _dg_client is not None
 
+    worker.turn_started_at = None
+
     async with _dg_client.listen.v2.connect(
         model="flux-general-en",
         encoding="linear16",
@@ -197,6 +201,8 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
                     # SDK natively supports async callbacks (awaits the return value).
                     # Swallow DB errors so a store failure doesn't trigger a Deepgram reconnect.
                     try:
+                        started_at = worker.turn_started_at or datetime.now(timezone.utc)
+                        worker.turn_started_at = None
                         await store_transcript(
                             participant_id=worker.participant_id,
                             character_name=worker.label,
@@ -206,6 +212,7 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
                             audio_window_start=float(getattr(message, "audio_window_start", 0.0)),
                             audio_window_end=float(getattr(message, "audio_window_end", 0.0)),
                             end_of_turn_confidence=float(getattr(message, "end_of_turn_confidence", 0.0)),
+                            started_at=started_at,
                         )
                     except Exception:
                         logger.exception("[%s] Failed to store transcript; dropping turn", label)
@@ -222,6 +229,8 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
                 chunk = await worker.queue.get()
                 if chunk == b"":
                     return  # clean sentinel exit
+                if worker.turn_started_at is None:
+                    worker.turn_started_at = datetime.now(timezone.utc)
                 await connection.send_media(chunk)
         finally:
             with contextlib.suppress(Exception):

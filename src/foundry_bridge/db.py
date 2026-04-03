@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone  # noqa: F401 (timezone used below)
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 if TYPE_CHECKING:
@@ -94,6 +94,7 @@ async def store_transcript(
     audio_window_start: float,
     audio_window_end: float,
     end_of_turn_confidence: float,
+    started_at: datetime,
 ) -> None:
     """Persist a single transcribed turn."""
     async with AsyncSessionLocal() as session:
@@ -108,6 +109,7 @@ async def store_transcript(
                     audio_window_start=audio_window_start,
                     audio_window_end=audio_window_end,
                     end_of_turn_confidence=end_of_turn_confidence,
+                    created_at=started_at,
                 )
             )
     logger.debug(
