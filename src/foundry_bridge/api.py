@@ -783,7 +783,7 @@ async def list_transcripts(
     q = sa.select(Transcript).where(Transcript.game_id == game_id)
     if character_name:
         q = q.where(Transcript.character_name.ilike(f"%{character_name}%"))
-    q = q.order_by(Transcript.created_at.asc()).limit(limit).offset(offset)
+    q = q.order_by(Transcript.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(q)
     return result.scalars().all()
 

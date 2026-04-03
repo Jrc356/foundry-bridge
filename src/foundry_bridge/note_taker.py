@@ -24,6 +24,7 @@ from foundry_bridge.note_generator import generate_note, validate_config
 logger = logging.getLogger(__name__)
 
 NOTE_CADENCE_MINUTES = int(os.getenv("NOTE_CADENCE_MINUTES", "10"))
+NOTE_MIN_TRANSCRIPTS = int(os.getenv("NOTE_MIN_TRANSCRIPTS", "20"))
 RECENT_NOTES_LIMIT = int(os.getenv("RECENT_NOTES_LIMIT", "3"))
 
 _task: asyncio.Task | None = None
@@ -76,7 +77,8 @@ async def _polling_loop() -> None:
             game_ids = await get_game_ids_with_unprocessed_transcripts()
             locked_games = []
 
-            logger.info("[%s] Poll cycle: %d game(s) with unprocessed transcripts", poll_time, len(game_ids))
+            log = logger.debug if not game_ids else logger.info
+            log("[%s] Poll cycle: %d game(s) with unprocessed transcripts", poll_time, len(game_ids))
 
             for gid in game_ids:
                 lock = get_game_lock(gid)
@@ -134,6 +136,12 @@ async def _run_pipeline_locked(game_id: int, lock: asyncio.Lock) -> None:
 async def _run_pipeline(game_id: int) -> bool:
     transcripts = await get_unprocessed_transcripts_for_game(game_id)
     if not transcripts:
+        return False
+    if len(transcripts) < NOTE_MIN_TRANSCRIPTS:
+        logger.debug(
+            "Skipping note pipeline for game %d: only %d unprocessed transcripts (min=%d)",
+            game_id, len(transcripts), NOTE_MIN_TRANSCRIPTS,
+        )
         return False
 
     # Filter out UUID-like character names (fallback from server.py)

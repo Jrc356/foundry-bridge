@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { getTranscripts } from '../../api'
 import { TabHeader } from '../../components/TabHeader'
 import type { Transcript } from '../../types'
-import { formatTimestamp, sortByCreatedAtDesc } from '../../utils/datetime'
+import { formatTimestamp } from '../../utils/datetime'
 
 const PAGE_SIZE = 50
 
@@ -16,8 +16,8 @@ export default function TranscriptsTab({ gameId }: { gameId: number }) {
   const { data: transcripts = [], isLoading } = useQuery({
     queryKey: ['transcripts', gameId, params],
     queryFn: () => getTranscripts(gameId, params),
+    refetchInterval: 5000,
   })
-  const sortedTranscripts = sortByCreatedAtDesc(transcripts)
 
   const handleFilter = (v: string) => { setCharFilter(v); setOffset(0) }
 
@@ -53,7 +53,7 @@ export default function TranscriptsTab({ gameId }: { gameId: number }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
-                {sortedTranscripts.map((t: Transcript) => (
+                {transcripts.map((t: Transcript) => (
                   <tr key={t.id} className="hover:bg-gray-800/50">
                     <td className="px-4 py-3 text-purple-300 font-medium whitespace-nowrap">{t.character_name}</td>
                     <td className="px-4 py-3 text-gray-400 text-center">{t.turn_index}</td>
