@@ -37,6 +37,7 @@ class SpeakerWorker:
     queue: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
     task: Optional[asyncio.Task] = None
     turn_started_at: Optional[datetime] = None
+    store_tasks: set[asyncio.Task] = field(default_factory=set)
 
 
 async def init() -> None:
@@ -130,6 +131,38 @@ async def _close_speaker_worker(participant_id: str) -> None:
     logger.info("Stopped speaker worker for %s (%s)", worker.label, participant_id)
 
 
+async def _persist_turn(
+    *,
+    worker: SpeakerWorker,
+    turn_index: int,
+    text: str,
+    audio_window_start: float,
+    audio_window_end: float,
+    end_of_turn_confidence: float,
+    started_at: datetime,
+) -> None:
+    """Persist a completed turn to the database.
+
+    Runs as a fire-and-forget task so the Deepgram read loop is not blocked
+    waiting on DB I/O (the SDK awaits on_message inline, so any await in that
+    callback prevents the next Deepgram message from being read).
+    """
+    try:
+        await store_transcript(
+            participant_id=worker.participant_id,
+            character_name=worker.label,
+            game_id=worker.game_id,
+            turn_index=turn_index,
+            text=text,
+            audio_window_start=audio_window_start,
+            audio_window_end=audio_window_end,
+            end_of_turn_confidence=end_of_turn_confidence,
+            started_at=started_at,
+        )
+    except Exception:
+        logger.exception("[%s] Failed to store transcript; dropping turn", worker.label)
+
+
 async def _speaker_loop(worker: SpeakerWorker) -> None:
     """Run the Deepgram streaming loop with exponential-backoff retry.
 
@@ -193,7 +226,7 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
         def on_error(error: Any) -> None:
             logger.warning("[%s] Deepgram error: %s", label, error)
 
-        async def on_message(message: Any) -> None:
+        def on_message(message: Any) -> None:
             if isinstance(message, ListenV2TurnInfo):
                 transcript = getattr(message, "transcript", "") or ""
                 event_name = getattr(message, "event", "")
@@ -206,15 +239,13 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
                         transcript.strip(),
                     )
                 if event_name == "EndOfTurn" and transcript.strip():
-                    # SDK natively supports async callbacks (awaits the return value).
-                    # Swallow DB errors so a store failure doesn't trigger a Deepgram reconnect.
-                    try:
-                        started_at = worker.turn_started_at or datetime.now(timezone.utc)
-                        worker.turn_started_at = None
-                        await store_transcript(
-                            participant_id=worker.participant_id,
-                            character_name=worker.label,
-                            game_id=worker.game_id,
+                    # Capture state synchronously before yielding — a second EndOfTurn
+                    # could arrive before the task runs if we deferred this.
+                    started_at = worker.turn_started_at or datetime.now(timezone.utc)
+                    worker.turn_started_at = None
+                    t = asyncio.create_task(
+                        _persist_turn(
+                            worker=worker,
                             turn_index=int(getattr(message, "turn_index", 0)),
                             text=transcript.strip(),
                             audio_window_start=float(getattr(message, "audio_window_start", 0.0)),
@@ -222,8 +253,9 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
                             end_of_turn_confidence=float(getattr(message, "end_of_turn_confidence", 0.0)),
                             started_at=started_at,
                         )
-                    except Exception:
-                        logger.exception("[%s] Failed to store transcript; dropping turn", label)
+                    )
+                    worker.store_tasks.add(t)
+                    t.add_done_callback(worker.store_tasks.discard)
 
         connection.on(EventType.OPEN, on_open)
         connection.on(EventType.MESSAGE, on_message)
@@ -246,3 +278,7 @@ async def _speaker_loop_once(worker: SpeakerWorker) -> None:
             listen_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await listen_task
+            # Drain any in-flight DB persistence tasks so transcripts are not dropped
+            # on clean shutdown or reconnect.
+            if worker.store_tasks:
+                await asyncio.gather(*list(worker.store_tasks), return_exceptions=True)
