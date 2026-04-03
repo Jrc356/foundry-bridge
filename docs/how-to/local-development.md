@@ -38,7 +38,7 @@ uv run alembic upgrade head
 make run
 ```
 
-This starts WebSocket ingestion (`8765`), health (`8766`), and API/SPA hosting (`8767`).
+This starts all three server components. Refer to [CLI commands](../reference/cli-commands.md) for the individual entrypoints.
 
 ## Step 5: Run the frontend dev server
 
@@ -70,3 +70,4 @@ make run-api
 - [How to set up API keys](./setup-api-keys.md)
 - [How to run database migrations](./database-migrations.md)
 - [CLI commands](../reference/cli-commands.md)
+- [Architecture and design decisions](../architecture.md)

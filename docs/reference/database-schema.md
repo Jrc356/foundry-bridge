@@ -42,9 +42,9 @@ Primary relational schema defined in `src/foundry_bridge/models.py` and evolved 
 |Game identity|Unique key on `(hostname, world_id)` for `games`|
 |Embeddings|Vector columns use pgvector with dimension 768 (`VECTOR_DIM`)|
 |Quest status|`quests.status` constrained to active/completed semantics in API layer|
-|Audit operation|`audit_flags.operation` constrained to `create\|update\|delete\|merge`|
+|Audit operation|`audit_flags.operation` constrained to `create`, `update`, `delete`, `merge`|
 |Audit table name|`audit_flags.table_name` constrained to allowed table taxonomy|
-|Audit confidence|`audit_flags.confidence` constrained to `low\|medium\|high`|
+|Audit confidence|`audit_flags.confidence` constrained to `low`, `medium`, `high`|
 |Soft deletes|Quests and threads use logical deletion fields (`is_deleted`, `deleted_at`, `deleted_reason`)|
 
 ## Migration lineage

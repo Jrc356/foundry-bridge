@@ -1,97 +1,92 @@
-# Understanding Foundry Bridge Architecture
+# About Foundry Bridge Architecture
 
-This document explains how Foundry Bridge is designed, why its pipelines are split the way they are, and what trade-offs shape runtime behavior.
+This document explains how Foundry Bridge is structured, why its pipelines are split the way they are, and what trade-offs shape runtime behavior. Understanding this helps when reasoning about delays, data quality issues, or unexpected system behavior.
 
 ## Background
 
 Foundry Bridge exists to turn live tabletop session audio into structured campaign memory. The central problem is not only transcription, but sustained extraction quality across many sessions where names, quest states, and plot threads evolve over time.
 
-The project therefore uses two cooperating loops:
+The project uses two cooperating loops:
 
 - A note generation pipeline that converts new transcripts into structured data.
 - An audit pipeline that revisits accumulated notes and proposes consistency corrections.
 
-## Conceptual flow
+These loops run independently, which means each can fail, stall, or be tuned without affecting the other.
+
+## How it works conceptually
 
 At a high level, the system has six stages:
 
 1. Foundry VTT userscript captures per-participant audio and streams it over WebSocket.
-2. The ingestion server normalizes session metadata and forwards frames to participant workers.
+2. The ingestion server normalizes session metadata and forwards frames to per-participant workers.
 3. Deepgram streaming workers emit transcript turns.
 4. The note pipeline batches unprocessed transcripts and generates structured outputs with an LLM agent.
 5. Structured outputs are persisted and embedded for semantic search.
 6. The audit pipeline periodically proposes merge/update/delete/create operations as audit flags.
 
-This separation keeps low-latency ingestion independent from heavier extraction and reconciliation work.
+The key insight here is that stages 1–3 are latency-sensitive (audio must flow in real time) while stages 4–6 are throughput-sensitive and can tolerate delay. Separating them means transcript ingestion is never blocked by LLM response time.
 
-## Why per-participant transcription workers
+## Design decisions and trade-offs
 
-Foundry Bridge uses a `SpeakerWorker` per participant instead of one shared stream. This has two practical effects:
+### Why per-participant transcription workers
 
-- Turn boundaries remain tied to a specific speaker identity.
-- A single unstable speaker stream can reconnect without forcing all speakers to reconnect.
+Foundry Bridge uses a `SpeakerWorker` per participant instead of one shared stream. This keeps turn boundaries tied to a specific speaker identity and means a single unstable speaker stream can reconnect without forcing all speakers to reconnect.
 
-The downside is more concurrent streaming sessions, which increases runtime connection management complexity.
+The trade-off is more concurrent streaming sessions, which increases connection management complexity at runtime.
 
-## Why game-scoped locking exists
+### Why game-scoped locking exists
 
-Both note generation and auditing mutate game-scoped records (quests, entities, threads, and related links). Without coordination, those pipelines could race and produce conflicting writes.
+Both note generation and auditing mutate game-scoped records — quests, entities, threads, and their linked artifacts. Without coordination, those pipelines could race and produce conflicting writes.
 
-A shared per-game lock prevents that race. The lock is intentionally scoped by `game_id`, so independent campaigns can still process in parallel.
+A shared per-game asyncio lock prevents that race. The lock is intentionally scoped by `game_id`, so independent campaigns process in parallel.
 
-Trade-off:
+The trade-off: long-running operations for one campaign will serialize additional work for that same campaign, but will never block a different campaign.
 
-- Benefit: deterministic in-game mutation order.
-- Cost: long-running operations for one campaign serialize additional work for that same campaign.
-
-## Why audits are separate from note generation
+### Why audits are separate from note generation
 
 The note pipeline optimizes for "new content now." The audit pipeline optimizes for "consistency over time." Combining both into one pass would reduce responsiveness and make failure handling harder.
 
-By splitting them:
+By separating them, notes are produced quickly from fresh transcripts, and audits run at a configurable cadence against accumulated history. Operators can also trigger manual audits when needed, independently of the note cycle.
 
-- Notes can be produced quickly from fresh transcripts.
-- Audits can be tuned by cadence and threshold (`AUDIT_CADENCE_SECONDS`, `AUDIT_AFTER_N_NOTES`).
-- Operators can trigger manual audits when needed.
+### Why semantic search uses embeddings
 
-## Why semantic search uses embeddings
+Campaign memory is rarely queried with exact wording. Embedding-based retrieval lets users find records by meaning rather than strict token matches.
 
-Campaign memory is rarely queried with exact wording. Embedding-based retrieval allows users to find records by meaning rather than strict token matches.
+Foundry Bridge stores vector embeddings in PostgreSQL with pgvector and computes them using FastEmbed. This enables one unified search surface spanning entities, notes, threads, events, decisions, loot, combat updates, and quests.
 
-Foundry Bridge stores vector embeddings in PostgreSQL with pgvector and computes them using FastEmbed. This enables one search surface spanning entities, notes, threads, events, decisions, loot, combat updates, and quests.
-
-Trade-off:
-
-- Benefit: better recall for fuzzy narrative queries.
-- Cost: additional compute and storage overhead for embedding generation and indexing.
+The trade-off is additional compute and storage overhead for embedding generation and indexing, in exchange for better recall on fuzzy narrative queries.
 
 ## Common misconceptions
 
 ### "If WebSocket ingest is healthy, notes should appear immediately"
 
-Not necessarily. Notes are generated by a cadence-driven background loop (`NOTE_CADENCE_MINUTES`). Ingestion, transcription, and note generation are intentionally decoupled.
+Not necessarily. Notes are generated by a cadence-driven background loop (`NOTE_CADENCE_MINUTES`). Ingestion, transcription, and note generation are intentionally decoupled. A healthy WebSocket connection means audio is flowing; it says nothing about the note generation cycle.
 
 ### "Audit flags are failures"
 
-Audit flags are suggestions, not hard errors. They are review artifacts used to improve consistency and can be applied, dismissed, or reopened.
+Audit flags are suggestions, not hard errors. They are review artifacts used to improve consistency and can be applied, dismissed, or reopened. The audit system is an editorial layer, not an error log.
 
 ### "Search only uses transcripts"
 
-Search queries fan out across multiple content types. Transcripts are one source, but not the only one.
+Search queries fan out across multiple content types. Transcripts are one source among many — entities, quests, threads, events, decisions, loot, and combat updates are all indexed and searched.
 
-## Implications for contributors and operators
+## Implications for understanding the system
 
-Understanding these boundaries helps with debugging and tuning:
+The pipeline boundaries map directly onto where problems surface:
 
-- Ingestion issues usually surface in WebSocket and transcriber components.
-- Delayed notes usually involve cadence, lock contention, or model config.
-- Data quality drift over time is expected to be handled by audit runs.
-- Search quality changes are influenced by embedding model/runtime decisions.
+- Audio not reaching the bridge → WebSocket and transcriber layer
+- Transcripts present but notes not appearing → note cadence, lock contention, or model configuration
+- Data inconsistencies accumulating over time → expected; the audit pipeline is the correction mechanism
+- Search recall changing unexpectedly → embedding model or runtime configuration changed
+
+The system is designed to degrade gracefully: note generation can fail without affecting audit runs, and audit runs can stall without affecting ingestion or search.
 
 ## Related
 
-- Tutorial: [Getting started with Foundry Bridge](./getting-started.md)
+- Tutorial: [Get started with Foundry Bridge](./getting-started.md)
 - How-to: [How to run local development](./how-to/local-development.md)
+- How-to: [How to run the audit workflow](./how-to/audit-workflow.md)
 - Reference: [WebSocket protocol](./reference/websocket-protocol.md)
 - Reference: [Database schema](./reference/database-schema.md)
+- Reference: [Backend modules](./reference/modules.md)
 - Reference: [API reference](./reference/api.md)

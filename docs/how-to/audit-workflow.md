@@ -57,3 +57,4 @@ curl -X POST "http://localhost:8767/api/games/1/audit-flags/123/reopen"
 - [API reference](../reference/api.md)
 - [Database schema](../reference/database-schema.md)
 - [How to load demo data](./load-demo-data.md)
+- [Architecture and design decisions](../architecture.md) — explains what audit flags are and why audits are a separate pipeline

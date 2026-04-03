@@ -1,6 +1,6 @@
 # Get Started with Foundry Bridge
 
-In this tutorial, we will run Foundry Bridge with Docker Compose, create your first campaign record, and confirm the UI and API are working end to end.
+In this tutorial, we will run Foundry Bridge with Docker Compose, create your first campaign record, and confirm the UI and API are working end to end. By the end, we will have a live stack with a working database, a populated game entry, and a browsable frontend.
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ LOG_LEVEL=INFO
 EOF
 ```
 
-You should see a new `.env` file in the repository root.
+You should see a new `.env` file in the repository root. This file is already excluded from version control.
 
 ## Step 2: Start the stack
 
@@ -34,11 +34,13 @@ Run:
 docker compose up
 ```
 
-After startup, you should see all three services running:
+Docker will pull or build images, start the database, run migrations, and bring up the bridge service. After a moment, you should see log output from all three services:
 
-- `postgres`
-- `migrate`
-- `bridge`
+- `postgres` — database accepting connections
+- `migrate` — migrations applied and process exited
+- `bridge` — WebSocket, health, and API servers listening
+
+Notice that `migrate` is expected to exit after the migration completes. That is normal behavior, not a failure.
 
 ## Step 3: Verify health and API endpoints
 
@@ -51,8 +53,8 @@ curl http://localhost:8767/api/games
 
 You should see:
 
-- A health payload with `{"status": "ok"}`
-- A JSON list from `/api/games` (often empty on first run)
+- A health payload: `{"status": "ok"}`
+- A JSON list from `/api/games` (empty on first run is expected)
 
 ## Step 4: Create your first game
 
@@ -64,21 +66,21 @@ curl -X POST http://localhost:8767/api/games \
   -d '{"hostname":"local.foundry.test","world_id":"demo-world","name":"Demo Campaign"}'
 ```
 
-You should see a JSON object containing an `id` and your campaign fields.
+You should see a JSON object containing an `id` and the fields you submitted. Remember the `id` — you will use it to address this campaign in all subsequent API calls.
 
 ## Step 5: Open the UI and confirm the campaign appears
 
 Open `http://localhost:5173` in your browser.
 
-You should see your campaign in the game list, and you should be able to open the detail page and tabs.
+You should see your campaign in the game list. Click through to the detail page and notice that all the data tabs are present and empty, ready to be filled by live session ingestion.
 
 ## What you've built
 
-You now have a running Foundry Bridge stack with a working database, migration flow, API server, and frontend. You also created and viewed your first campaign record.
+We now have a running Foundry Bridge stack: database, migration history, API server, and frontend, all communicating correctly. We also created and browsed our first campaign record.
 
 ## Next steps
 
-- To connect live Foundry audio, use [How to integrate Foundry VTT userscript](./how-to/foundry-integration.md)
-- To run the app in split local mode, use [How to run local development](./how-to/local-development.md)
-- To understand the runtime architecture, read [Architecture and design decisions](./architecture.md)
-- To browse API details, use [API reference](./reference/api.md)
+- To connect live Foundry audio to this stack, use [How to integrate Foundry VTT userscript](./how-to/foundry-integration.md)
+- To run the backend and frontend in local development mode, use [How to run local development](./how-to/local-development.md)
+- To understand why the system is structured the way it is, read [Architecture and design decisions](./architecture.md)
+- To browse the full API, visit `http://localhost:8767/docs` or refer to the [API reference](./reference/api.md)

@@ -27,7 +27,7 @@ Apply and verify migrations when schema changes are included.
 
 ## Step 3: Validate behavior in UI and API
 
-Check endpoints and UI tabs affected by your change.
+Check the endpoints and UI tabs affected by your change. If the API surface changed, confirm the response shape against the [API reference](../reference/api.md). If schema changed, run and verify the migration with `uv run alembic current`.
 
 ## Step 4: Prepare a focused commit
 
@@ -47,3 +47,4 @@ Include:
 - [How to run local development](./local-development.md)
 - [How to run database migrations](./database-migrations.md)
 - [Architecture and design decisions](../architecture.md)
+- [API reference](../reference/api.md)

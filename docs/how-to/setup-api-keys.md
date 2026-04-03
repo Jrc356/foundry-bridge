@@ -33,13 +33,15 @@ ANTHROPIC_API_KEY=replace-with-your-key
 
 When `MODEL_PROVIDER=anthropic`, `ANTHROPIC_API_KEY` is required.
 
-## Step 3: Start or restart services
+## Step 3: Apply the new configuration
+
+If services are not yet running:
 
 ```bash
 docker compose up -d --build
 ```
 
-If services are already running, restart the bridge service:
+If services are already running, restart the bridge service to pick up the updated environment:
 
 ```bash
 docker compose restart bridge
@@ -53,7 +55,7 @@ Check service logs:
 docker compose logs bridge --tail=100
 ```
 
-Look for normal startup without runtime key errors.
+Look for normal startup output. A missing or mismatched key will surface as a startup error in these logs.
 
 ## Related
 

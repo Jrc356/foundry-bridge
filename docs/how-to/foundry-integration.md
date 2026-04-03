@@ -17,15 +17,15 @@ This guide shows you how to install the userscript bridge and verify that Foundr
 
 ## Step 2: Set the bridge WebSocket URL
 
-In `userscript.js`, update `CONFIG.WS_URL` when needed.
+In `userscript.js`, locate the `CONFIG` object near the top of the file and update `WS_URL`.
 
-Example for local bridge:
+Example for a local bridge:
 
 ```js
 WS_URL: "ws://127.0.0.1:8765"
 ```
 
-If Foundry runs on another machine, set this to an address reachable from the browser running Foundry.
+If Foundry runs on a different machine from the bridge, set this to an address reachable from the browser running Foundry. The WebSocket port defaults to `8765` — refer to [Environment variables](../reference/environment-variables.md) if you changed `WS_PORT`.
 
 ## Step 3: Open your Foundry world and voice session
 
@@ -53,5 +53,6 @@ After successful identification, a game entry with matching host/world metadata 
 ## Related
 
 - [WebSocket protocol](../reference/websocket-protocol.md)
+- [Environment variables](../reference/environment-variables.md)
 - [How to troubleshoot common issues](./troubleshoot-common-issues.md)
-- [Getting started with Foundry Bridge](../getting-started.md)
+- [Get started with Foundry Bridge](../getting-started.md)
