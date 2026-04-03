@@ -2,6 +2,14 @@
 
 Foundry Bridge captures live tabletop session audio, transcribes it, extracts structured campaign data, and exposes that data through a searchable web UI and API.
 
+## Status
+
+Tried this for a session and made some changes along the way. So far it's kinda meh.
+A little too aggressive in its note taking. Even when there's nothing to note down.
+The transcription quality is also not great.
+But overall it's a fun experiment and a good starting point for building something more robust.
+
+
 ## Quick Start
 
 Use the tutorial for the fastest path to a working stack:
